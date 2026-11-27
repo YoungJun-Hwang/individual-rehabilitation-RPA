@@ -189,7 +189,14 @@ class DB:
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
         self.conn.executescript(SCHEMA)
+        self._migrate()
         self.conn.commit()
+
+    def _migrate(self):
+        """예전 버전 DB에 새 칸 추가 (자료는 그대로)."""
+        cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(users)")}
+        if "must_change" not in cols:   # 비밀번호 초기화 뒤 다음 로그인 때 바꾸게 함
+            self.conn.execute("ALTER TABLE users ADD COLUMN must_change INTEGER NOT NULL DEFAULT 0")
 
     @contextmanager
     def tx(self):
@@ -245,13 +252,66 @@ class DB:
     def login(self, name: str, pw: str) -> dict | None:
         u = self.one("SELECT * FROM users WHERE name=? AND active=1", (name.strip(),))
         if u and secrets.compare_digest(u["pw_hash"], self._hash(pw, u["salt"])):
-            return {"id": u["id"], "name": u["name"], "role": u["role"]}
+            return {"id": u["id"], "name": u["name"], "role": u["role"], "must_change": bool(u["must_change"])}
         return None
+
+    # ---------- 비밀번호 ----------
+    MIN_PW = 4
+
+    def _check_new_pw(self, new_pw: str):
+        if len(new_pw or "") < self.MIN_PW:
+            raise ValueError(f"새 비밀번호는 {self.MIN_PW}자 이상이어야 합니다.")
+
+    def _set_pw(self, c, user_id: int, new_pw: str, must_change: bool):
+        salt = secrets.token_hex(16)
+        c.execute("UPDATE users SET pw_hash=?, salt=?, must_change=? WHERE id=?",
+                  (self._hash(new_pw, salt), salt, int(must_change), user_id))
+
+    def change_password(self, user_id: int, current_pw: str, new_pw: str):
+        """본인 비밀번호 바꾸기. 지금 비밀번호가 맞아야 함."""
+        u = self.one("SELECT * FROM users WHERE id=? AND active=1", (user_id,))
+        if not u or not secrets.compare_digest(u["pw_hash"], self._hash(current_pw or "", u["salt"])):
+            raise PermissionError("지금 비밀번호가 맞지 않습니다.")
+        self._check_new_pw(new_pw)
+        if secrets.compare_digest(u["pw_hash"], self._hash(new_pw, u["salt"])):
+            raise ValueError("새 비밀번호가 지금 비밀번호와 같습니다.")
+        with self.tx() as c:
+            self._set_pw(c, user_id, new_pw, must_change=False)
+            self.log(None, user_id, "비밀번호 변경", u["name"])
+
+    def reset_password(self, actor: dict, target_id: int, temp_pw: str):
+        """변호사·관리자가 다른 사람 비밀번호를 임시 비밀번호로 초기화. 그 사람은 다음 로그인 때 바꿔야 함."""
+        if actor["role"] not in (ROLE_LAWYER, ROLE_ADMIN):
+            raise PermissionError("변호사·관리자 계정만 다른 사람의 비밀번호를 초기화할 수 있습니다.")
+        if target_id == actor["id"]:
+            raise PermissionError("본인 비밀번호는 '내 비밀번호 바꾸기'에서 바꾸세요.")
+        t = self.one("SELECT name FROM users WHERE id=?", (target_id,))
+        if not t:
+            raise ValueError("없는 사용자입니다.")
+        self._check_new_pw(temp_pw)
+        with self.tx() as c:
+            self._set_pw(c, target_id, temp_pw, must_change=True)
+            self.log(None, actor["id"], "비밀번호 초기화", t["name"])
+
+    def recover_password(self, target_id: int, temp_pw: str):
+        """모든 비밀번호를 잊었을 때 이 PC에서 관리 도구(비밀번호_초기화.bat)로만 씀."""
+        t = self.one("SELECT name FROM users WHERE id=?", (target_id,))
+        if not t:
+            raise ValueError("없는 사용자입니다.")
+        self._check_new_pw(temp_pw)
+        with self.tx() as c:
+            self._set_pw(c, target_id, temp_pw, must_change=True)
+            c.execute("UPDATE users SET active=1 WHERE id=?", (target_id,))
+            self.log(None, None, "비밀번호 초기화 (관리 도구)", t["name"])
+
+    def password_log(self) -> list[dict]:
+        return self.q("SELECT a.at, u.name AS user, a.action, a.detail AS target FROM audit_log a "
+                      "LEFT JOIN users u ON u.id=a.user_id WHERE a.action LIKE '비밀번호%' ORDER BY a.id DESC LIMIT 50")
 
     def users(self, role: str | None = None) -> list[dict]:
         if role:
-            return self.q("SELECT id,name,role,active FROM users WHERE role=? ORDER BY name", (role,))
-        return self.q("SELECT id,name,role,active FROM users ORDER BY role,name")
+            return self.q("SELECT id,name,role,active,must_change FROM users WHERE role=? ORDER BY name", (role,))
+        return self.q("SELECT id,name,role,active,must_change FROM users ORDER BY role,name")
 
     # ---------- 사건 ----------
     def create_case(self, user_id, **f) -> int:

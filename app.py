@@ -1431,27 +1431,96 @@ def page_audit(case):
 
 
 # ---------------- 화면: 계정 관리 ----------------
+def password_form(key: str, title: str, current_label: str = "지금 비밀번호") -> bool:
+    """본인 비밀번호 바꾸기 양식. 바꾸면 True."""
+    with st.form(key, clear_on_submit=True):
+        st.markdown(f"**{title}**")
+        cur = st.text_input(current_label, type="password")
+        c1, c2 = st.columns(2)
+        new = c1.text_input(f"새 비밀번호 ({DB.MIN_PW}자 이상)", type="password")
+        new2 = c2.text_input("새 비밀번호 한 번 더", type="password")
+        if st.form_submit_button("비밀번호 바꾸기", type="primary"):
+            if new != new2:
+                st.error("새 비밀번호 두 칸이 서로 다릅니다.")
+                return False
+            try:
+                db.change_password(ss.user["id"], cur, new)
+                return True
+            except (PermissionError, ValueError) as e:
+                st.error(str(e))
+    return False
+
+
+def forced_password_change():
+    st.title("비밀번호 바꾸기")
+    st.warning(f"{ss.user['name']}님의 비밀번호가 임시 비밀번호로 초기화되었습니다. 계속하려면 새 비밀번호로 바꾸세요.")
+    if password_form("pw_forced", "새 비밀번호 정하기", "받은 임시 비밀번호"):
+        ss.user["must_change"] = False
+        ss["pwflash"] = "비밀번호를 바꿨습니다."
+        st.rerun()
+    if st.button("로그아웃"):
+        for k in list(ss.keys()):
+            del ss[k]
+        st.rerun()
+
+
 def page_users():
     st.header("계정 관리")
-    st.dataframe(pd.DataFrame(db.users()).rename(columns={"name": "이름", "role": "역할", "active": "사용"}),
+    flash = ss.pop("pwflash", None)
+    if flash:
+        st.success(flash)
+    users = db.users()
+    st.dataframe(pd.DataFrame([{"이름": u["name"], "역할": u["role"], "사용": "예" if u["active"] else "아니오",
+                                "비밀번호": "변경 필요 (임시)" if u["must_change"] else ""} for u in users]),
                  hide_index=True)
+
+    if password_form("pw_mine", f"내 비밀번호 바꾸기 ({ss.user['name']})"):
+        ss["pwflash"] = "비밀번호를 바꿨습니다. 다음 로그인부터 새 비밀번호를 쓰세요."
+        st.rerun()
+
     if ss.user["role"] not in (ROLE_LAWYER, ROLE_ADMIN):
-        st.info("계정 추가는 변호사·관리자 계정에서 할 수 있습니다.")
+        st.info("계정 추가와 다른 사람의 비밀번호 초기화는 변호사·관리자 계정에서 할 수 있습니다.")
         return
+
+    st.divider()
+    others = [u for u in users if u["id"] != ss.user["id"]]
+    with st.form("pw_reset", clear_on_submit=True):
+        st.markdown("**다른 사람 비밀번호 초기화** — 비밀번호를 잊은 사람에게 임시 비밀번호를 정해 주면, "
+                    "그 사람은 다음 로그인 때 새 비밀번호로 바꿔야 합니다.")
+        c1, c2 = st.columns(2)
+        target = c1.selectbox("사용자", [f"{u['name']} ({u['role']})" for u in others]) if others else None
+        temp = c2.text_input(f"임시 비밀번호 ({DB.MIN_PW}자 이상)", type="password")
+        if st.form_submit_button("초기화") and target:
+            t = others[[f"{u['name']} ({u['role']})" for u in others].index(target)]
+            try:
+                db.reset_password(ss.user, t["id"], temp)
+                ss["pwflash"] = f"{t['name']}님의 비밀번호를 임시 비밀번호로 초기화했습니다. 임시 비밀번호를 직접 알려 주세요."
+                st.rerun()
+            except (PermissionError, ValueError) as e:
+                st.error(str(e))
+
+    st.divider()
     with st.form("add_user", clear_on_submit=True):
+        st.markdown("**계정 추가**")
         c1, c2, c3 = st.columns(3)
         n = c1.text_input("이름")
         r = c2.selectbox("역할", ROLES)
         p = c3.text_input("비밀번호", type="password")
         if st.form_submit_button("계정 추가"):
             try:
-                if not n.strip() or len(p) < 4:
-                    raise ValueError("이름과 4자 이상 비밀번호를 입력하세요.")
+                if not n.strip() or len(p) < DB.MIN_PW:
+                    raise ValueError(f"이름과 {DB.MIN_PW}자 이상 비밀번호를 입력하세요.")
                 db.add_user(n, r, p)
                 st.success("추가했습니다.")
                 st.rerun()
             except Exception as e:
                 st.error(str(e))
+
+    log = db.password_log()
+    if log:
+        with st.expander("비밀번호 변경 기록"):
+            st.dataframe(pd.DataFrame(log).rename(columns={"at": "일시", "user": "한 사람", "action": "작업",
+                                                          "target": "대상"}), hide_index=True, width="stretch")
 
 
 # ---------------- 메인 ----------------
@@ -1470,6 +1539,11 @@ def main():
     if "user" not in ss:
         login_screen()
         return
+    if ss.user.get("must_change"):
+        forced_password_change()
+        return
+    if ss.get("page") != "계정 관리" and ss.get("pwflash"):
+        st.success(ss.pop("pwflash"))
     ss.setdefault("page", "사건 목록")
     ss.setdefault("case_id", None)
     user = ss.user
