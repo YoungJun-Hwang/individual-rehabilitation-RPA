@@ -18,30 +18,32 @@
 | Windows 10 또는 11 (64비트) | 필수 | |
 | Python 3.12 (3.11~3.13) | 필수 | 프로그램 실행 |
 | 인터넷 연결 | 처음 설치·업데이트 때만 | 필요한 부품 내려받기 (사용 중에는 필요 없음) |
-| 한컴오피스 한글 | 선택 | HWP 출력. 없으면 엑셀·HTML로만 출력 |
-| Tesseract OCR | 선택 | 스캔본·사진 부채증명서와 보정명령 읽기. 전자 발급 PDF는 없어도 읽음 |
+| 한컴오피스 한글 | 선택 | HWP 출력. 없으면 엑셀·HTML(웹 문서)로만 출력 |
+| Tesseract (글자 인식 프로그램, OCR) | 선택 | 스캔본·사진 부채증명서와 보정명령 읽기. 전자 발급 PDF는 없어도 읽음 |
 
 ### 1. Python 설치
 
-1. https://www.python.org/downloads/windows/ 에서 **Python 3.12**의 "Windows installer (64-bit)"를 받습니다.
-2. 설치 파일을 실행하고, 첫 화면 아래쪽의 **"Add python.exe to PATH"를 꼭 체크**한 뒤 "Install Now"를 누릅니다.
+1. https://www.python.org/downloads/windows/ 에서 **Python 3.12**의 "Windows installer (64-bit)"(Windows용 64비트 설치 파일)를 받습니다.
+2. 설치 파일을 실행하고, 첫 화면 아래쪽의 **"Add python.exe to PATH"(어디서나 Python을 실행할 수 있게 등록)를 꼭 체크**한 뒤
+   "Install Now"(지금 설치)를 누릅니다.
 3. 확인: 시작 메뉴에서 "명령 프롬프트"를 열고 `python --version`을 입력해 `Python 3.12.x`가 나오면 됩니다.
 
 ### 2. 프로그램 받기
 
 1. GitHub 저장소 페이지(https://github.com/YoungJun-Hwang/individual-rehabilitation-rpa)에서
-   초록색 **Code → Download ZIP**을 누릅니다. 비공개 저장소라면 접근 권한이 있는 계정으로 로그인해야 합니다.
+   초록색 **Code**(코드) 버튼 → **Download ZIP**(ZIP 파일로 내려받기)을 누릅니다. 비공개 저장소라면 접근 권한이 있는 계정으로 로그인해야 합니다.
 2. 받은 ZIP 파일을 **오른쪽 클릭 → 속성 → 아래쪽 "차단 해제" 체크 → 확인**. (안 하면 실행할 때 Windows가 경고합니다.)
 3. 압축을 풀고, 폴더를 알아보기 쉬운 곳으로 옮깁니다. 예: `C:\개인회생`
-   - 바탕화면·다운로드 폴더보다 `C:\` 바로 아래가 좋습니다 (OneDrive로 동기화되는 폴더는 피하세요. 의뢰인 자료가 클라우드로 올라갑니다).
+   - 바탕화면·다운로드 폴더보다 `C:\` 바로 아래가 좋습니다 (OneDrive(원드라이브)로 동기화되는 폴더는 피하세요. 의뢰인 자료가 클라우드로 올라갑니다).
    - 압축을 풀면 폴더 이름이 `individual-rehabilitation-rpa-main`이 됩니다. 이름은 바꿔도 됩니다.
 
-git을 쓴다면 `git clone https://github.com/YoungJun-Hwang/individual-rehabilitation-rpa C:\개인회생` 으로 받아도 됩니다.
+git(코드 관리 프로그램)을 쓴다면 `git clone https://github.com/YoungJun-Hwang/individual-rehabilitation-rpa C:\개인회생` 으로 받아도 됩니다.
 
-### 3. (선택) Tesseract OCR 설치 — 스캔본을 읽으려면
+### 3. (선택) Tesseract 설치 — 스캔본을 읽으려면
 
-1. https://github.com/UB-Mannheim/tesseract/wiki 에서 Windows용 설치 파일(64bit)을 받아 실행합니다.
-2. 설치 중 "Choose Components" 화면에서 **Additional language data → Korean을 꼭 체크**하세요.
+1. https://github.com/UB-Mannheim/tesseract/wiki 에서 Windows용 64비트 설치 파일을 받아 실행합니다.
+2. 설치 중 "Choose Components"(설치할 구성 요소 고르기) 화면에서
+   **Additional language data(추가 언어 데이터) → Korean(한국어)을 꼭 체크**하세요.
 3. 설치 위치는 기본값(`C:\Program Files\Tesseract-OCR`)을 그대로 두면 프로그램이 알아서 찾습니다.
    다른 곳에 설치했으면 Windows 환경 변수 `TESSERACT_CMD`에 `tesseract.exe`의 전체 경로를 넣으세요.
 
@@ -80,7 +82,7 @@ git을 쓴다면 `git clone https://github.com/YoungJun-Hwang/individual-rehabil
 | `questionnaire.json` | 채무 문진 항목 | 필요하면 항목 추가 (지우면 기존 사건 표시가 사라지니 추가만 권장) |
 | `correction_rules.json` | 보정명령 분류·추천 서류 규칙 | 사무소에서 자주 받는 보정 문구에 맞게 |
 
-메모장으로 저장할 때 인코딩은 **UTF-8**을 유지하세요. 쉼표·따옴표를 지우면 프로그램이 열리지 않으니 고치기 전에 파일을 복사해 두면 안전합니다.
+메모장으로 저장할 때 인코딩(글자 저장 방식)은 **UTF-8**을 그대로 두세요. 쉼표·따옴표를 지우면 프로그램이 열리지 않으니 고치기 전에 파일을 복사해 두면 안전합니다.
 
 ### 7. (선택) HWP 출력 준비
 
@@ -136,7 +138,7 @@ git을 쓴다면 `git clone https://github.com/YoungJun-Hwang/individual-rehabil
 ### git으로 받은 경우
 
 1. 프로그램을 끄고 `백업.bat`을 실행합니다.
-2. 프로그램 폴더에서 `git pull`. `config` 파일을 직접 고쳤다면 pull이 멈출 수 있습니다.
+2. 프로그램 폴더에서 `git pull`(새 버전 받기)을 실행합니다. `config` 파일을 직접 고쳤다면 `git pull`이 멈출 수 있습니다.
    그때는 `git stash` → `git pull` → `git stash pop` 순서로 하고, 충돌이 나면 `config` 파일을 직접 합치세요.
 3. `실행.bat`을 실행합니다. 필요한 부품이 바뀌었으면 자동으로 설치합니다.
    `data`, `backup`, `output` 폴더는 git이 건드리지 않으므로 자료는 그대로입니다.
@@ -155,16 +157,16 @@ git을 쓴다면 `git clone https://github.com/YoungJun-Hwang/individual-rehabil
 
 | 증상 | 해결 |
 |---|---|
-| "Python을 찾을 수 없습니다" | 1단계를 다시 하되 **Add python.exe to PATH**를 체크하세요. 설치 뒤 PC를 다시 시작하면 확실합니다. |
+| "Python을 찾을 수 없습니다" | 1단계를 다시 하되 **Add python.exe to PATH**(PATH 등록)를 체크하세요. 설치 뒤 PC를 다시 시작하면 확실합니다. |
 | "설치에 실패했습니다" | 인터넷 연결을 확인하세요. 사무소 방화벽·프록시가 막으면 전산 담당에게 `pypi.org`, `files.pythonhosted.org` 접속 허용을 요청하세요. Python 3.14처럼 너무 새 버전이면 3.12로 다시 설치하세요. |
 | 업데이트 뒤 "처음 설정" 화면이 나옴 | 자료를 옮기지 않은 것입니다. 계정을 만들지 말고 끈 뒤, 예전 폴더의 `data` 폴더를 새 폴더 바로 안에 복사하세요 (업데이트 4단계). |
 | "백업할 자료 파일이 없습니다" | `백업.bat`을 실제로 쓰는 프로그램 폴더에서 실행했는지 확인하세요. |
 | 설치 중 오류가 나서 계속 실패 | 프로그램 폴더의 `.venv` 폴더를 지우고 `실행.bat`을 다시 실행하세요 (자료는 지워지지 않습니다). |
 | 브라우저가 안 열림 | 주소창에 http://localhost:8501 을 입력하세요. |
-| "Port 8501 is already in use" | 이미 켜진 검은 창이 있습니다. 그 창을 쓰거나 닫고 다시 실행하세요. |
+| "Port 8501 is already in use" (8501번 포트를 이미 쓰는 중) | 이미 켜진 검은 창이 있습니다. 그 창을 쓰거나 닫고 다시 실행하세요. |
 | 글자가 깨진 검은 창 | 실행에는 문제없습니다. 안내 문구만 깨진 것입니다. |
 | HWP 버튼이 눌리지 않음 | 한글이 설치된 Windows PC에서만 됩니다. 한글을 설치했는데도 안 되면 한글을 한 번 직접 실행했다가 닫고 다시 해 보세요. |
-| "Tesseract OCR이 설치되어 있지 않습니다" / "한국어 데이터(kor)가 없습니다" | 3단계를 다시 하세요. Korean 체크를 빠뜨린 경우가 많습니다. |
+| "Tesseract OCR이 설치되어 있지 않습니다" / "한국어 데이터(kor)가 없습니다" | 3단계를 다시 하세요. Korean(한국어) 체크를 빠뜨린 경우가 많습니다. |
 | 설정 파일을 고친 뒤 프로그램이 안 열림 | 고친 `config` 파일의 쉼표·따옴표를 확인하거나, 복사해 둔 원래 파일로 되돌리세요. |
 | 비밀번호를 잊음 | 변호사·관리자 계정의 **계정 관리 → 다른 사람 비밀번호 초기화**. 모든 계정을 잊었다면 **`비밀번호_초기화.bat`** 실행 (위 "5. 계정 만들기"). |
 
@@ -218,12 +220,12 @@ git을 쓴다면 `git clone https://github.com/YoungJun-Hwang/individual-rehabil
 발급처(한국신용정보원, NICE, KCB 등)마다 양식이 달라 잘 안 읽히는 경우가 있습니다. 그때는 `core/credit_pdf.py` 위쪽의
 키워드 목록(`INST_HEADERS`, `AMOUNT_HEADERS` 등)을 고치거나, 개인정보를 가린 샘플로 양식에 맞춰 조정하세요.
 
-## 부채증명서 OCR·금액 대조 (3단계)
+## 부채증명서 글자 인식(OCR)·금액 대조 (3단계)
 
 부채증명서 대조 화면 → 파일 올리기(여러 개 가능) → 읽기 → 한 장씩 확인.
 
-- **전자 발급 PDF**(글자가 들어 있는 PDF)는 OCR 없이 바로 읽습니다.
-- **스캔본 PDF·사진(JPG/PNG/TIFF)**은 Tesseract OCR로 읽습니다. 표의 괘선을 지우고 읽는 방식과 가볍게 읽는 방식
+- **전자 발급 PDF**(글자가 들어 있는 PDF)는 글자 인식 없이 바로 읽습니다.
+- **스캔본 PDF·사진(JPG/PNG/TIFF)**은 Tesseract로 글자를 인식해 읽습니다. 표의 괘선을 지우고 읽는 방식과 가볍게 읽는 방식
   두 가지로 읽어 더 잘 읽힌 쪽을 씁니다.
 - 읽는 것: 금액 기준일("○○ 현재"), 계약별 과목·발생일·원금·이자·지연손해금(연체이자)·기타 비용·합계, 채무자 이름.
   "대출금액(최초 대출금)" 열은 갚을 돈이 아니므로 읽지 않습니다.
@@ -236,7 +238,7 @@ git을 쓴다면 `git clone https://github.com/YoungJun-Hwang/individual-rehabil
   **증명서만 기록**: 채권은 그대로 두고 기록만 남깁니다. 금액이 다르면 누락 점검(R7)에 경고가 뜹니다.
 - 대행 업체가 여러 증명서를 한 파일로 보냈으면 "쪽마다 따로 읽기"를 체크하세요. 옆으로 누운 스캔본은 회전을 고르세요.
 
-스캔본을 읽으려면 Tesseract OCR이 있어야 합니다 (위 "설치 3단계").
+스캔본을 읽으려면 Tesseract가 있어야 합니다 (위 "설치 3단계").
 
 스캔 품질이 나쁘면(흐림, 기울어짐, 도장이 숫자를 가림) 잘못 읽을 수 있습니다. 반드시 원문과 대조하세요.
 양식이 달라 잘 안 읽히는 기관이 있으면 `core/debt_cert.py` 위쪽의 `COLUMN_WORDS` 키워드를 고치면 됩니다.
@@ -251,12 +253,12 @@ git을 쓴다면 `git clone https://github.com/YoungJun-Hwang/individual-rehabil
   서류(거래내역서, 급여명세서, 해약환급금 증명서 등)와 답변 첫 문장을 넣어 둡니다. 규칙은 `config/correction_rules.json`.
 - **기한**: 송달일 다음 날부터 세어 정한 일수째. 마지막 날이 토·일·공휴일이면 다음 평일(민법 제161조).
   공휴일은 `config/holidays.json` — **대체·임시공휴일은 직접 확인해 고치세요.** 기한은 화면에서 직접 고칠 수 있습니다.
-  사건 목록 맨 위와 왼쪽 메뉴에 D-day가 나옵니다(3일 이내 빨강, 7일 이내 주황).
+  사건 목록 맨 위와 왼쪽 메뉴에 남은 날(D-day)이 나옵니다(3일 이내 빨강, 7일 이내 주황).
 - **자료 요청**: 서류별로 요청 전 / 요청함 / 받음 / 생략(사유 필수). 의뢰인 안내문(문자·카톡용)을 만들어 주며,
   마감일은 법원 기한보다 며칠 앞입니다(`config/office.json`의 `client_lead_days`, 사무소 이름도 여기서).
 - **승인**: 모든 항목에 답변이 있고 서류가 모두 '받음' 또는 '생략'이어야 변호사 계정에서 승인할 수 있습니다.
   승인 뒤 답변·서류를 고치면 '작성 중'으로 돌아갑니다. 승인 → 제출 완료로 표시하면 기한 알림에서 빠집니다.
-- **보정서 출력**: 미리보기, HTML, 전자소송 붙여넣기용 글(TXT), HWP(한글 설치 PC). 승인 전에는 [초안] 표시.
+- **보정서 출력**: 미리보기, HTML(웹 문서), 전자소송 붙여넣기용 글(TXT, 텍스트 파일), HWP(한글 설치 PC). 승인 전에는 [초안] 표시.
   첨부서류 목록은 '받음' 처리한 서류로 자동으로 만들어집니다.
 
 ## 변제계획안 (5단계)
@@ -281,9 +283,9 @@ git을 쓴다면 `git clone https://github.com/YoungJun-Hwang/individual-rehabil
 
 한글(한컴오피스)이 설치된 PC에서만 됩니다. 두 가지 방식이 있습니다.
 
-**A. 양식 없이 (기본)**: 프로그램이 표를 만들어 HWP로 저장합니다.
+**방식 1. 양식 없이 (기본)**: 프로그램이 표를 만들어 HWP로 저장합니다.
 
-**B. 사무소 양식 사용**: `templates/채권자목록_양식.hwp` 파일을 두면 그 양식의 누름틀에 내용을 채웁니다.
+**방식 2. 사무소 양식 사용**: `templates/채권자목록_양식.hwp` 파일을 두면 그 양식의 누름틀에 내용을 채웁니다.
 양식 만드는 법: 한글에서 양식을 열고, 채울 자리에 `입력 → 개체 → 누름틀`을 넣은 뒤 누름틀 고치기에서 **필드 이름**을 아래처럼 지정합니다.
 
 - 머리글: `사건번호`, `채무자`, `법원`, `기준일`, `작성일`, `초안표시`
@@ -292,11 +294,11 @@ git을 쓴다면 `git clone https://github.com/YoungJun-Hwang/individual-rehabil
 - 합계 행: `합계_원금`, `합계_이자`, `합계_지연손해금`, `합계_합계`, `미확인건수`
 
 한글이 "파일에 접근하려 합니다" 창을 띄우면 "모두 허용"을 누르세요. 이 창을 없애려면 한컴의
-보안 모듈(FilePathCheckerModule)을 등록하면 됩니다.
+파일 접근 보안 모듈(FilePathCheckerModule)을 등록하면 됩니다.
 
 ## 개발 현황과 테스트
 
-설계 문서의 기능 우선순위 1~5단계(채권자목록, 신용정보조회서 PDF, 부채증명서 OCR, 보정명령, 변제계획안)를 모두 만들었습니다.
+설계 문서의 기능 우선순위 1~5단계(채권자목록, 신용정보조회서 PDF, 부채증명서 글자 인식, 보정명령, 변제계획안)를 모두 만들었습니다.
 아직 실제 자료로는 시험하지 않았으므로, 처음에는 사건 몇 건을 기존 방식과 함께 처리하며 결과를 비교하세요.
 
-개발자용 자동 시험: `pip install -r requirements.txt pytest` 후 `python -m pytest` (스캔본 시험은 Tesseract가 있어야 실행됨).
+개발자용 자동 시험: `pip install -r requirements.txt pytest` 후 `python -m pytest` (스캔본 시험은 Tesseract가 있어야 실행됩니다).
