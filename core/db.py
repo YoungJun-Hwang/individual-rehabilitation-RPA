@@ -111,6 +111,43 @@ CREATE TABLE IF NOT EXISTS debt_certs (
     user_id INTEGER REFERENCES users(id),
     created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS corrections (
+    id INTEGER PRIMARY KEY,
+    case_id INTEGER NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
+    seq INTEGER NOT NULL DEFAULT 1,
+    order_date TEXT,
+    served_date TEXT,
+    days INTEGER,
+    deadline TEXT,
+    source_name TEXT,
+    raw_text TEXT,
+    status TEXT NOT NULL DEFAULT '작성 중',
+    approved_by INTEGER REFERENCES users(id),
+    approved_at TEXT,
+    submitted_at TEXT,
+    memo TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS correction_items (
+    id INTEGER PRIMARY KEY,
+    correction_id INTEGER NOT NULL REFERENCES corrections(id) ON DELETE CASCADE,
+    no TEXT NOT NULL,
+    heading TEXT,
+    text TEXT NOT NULL,
+    category TEXT,
+    answer TEXT,
+    sort_order INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS correction_docs (
+    id INTEGER PRIMARY KEY,
+    item_id INTEGER NOT NULL REFERENCES correction_items(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT '요청 전',
+    requested_at TEXT,
+    received_at TEXT,
+    note TEXT
+);
 CREATE TABLE IF NOT EXISTS warning_acks (
     case_id INTEGER NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
     warning_id TEXT NOT NULL,
@@ -479,6 +516,155 @@ class DB:
         with self.tx() as c:
             c.execute("DELETE FROM debt_certs WHERE id=?", (cert_id,))
             self.log(r["case_id"], user_id, "부채증명서 기록 삭제", r["source_name"])
+
+    # ---------- 보정명령 (4단계) ----------
+    def create_correction(self, case_id, user_id, *, order_date, served_date, days, deadline, source_name,
+                          raw_text, items: list[dict]) -> int:
+        """items: [{no, heading, text, category, answer, docs: [이름]}]"""
+        seq = self.one("SELECT COALESCE(MAX(seq),0)+1 n FROM corrections WHERE case_id=?", (case_id,))["n"]
+        t = now()
+        with self.tx() as c:
+            cur = c.execute(
+                "INSERT INTO corrections(case_id,seq,order_date,served_date,days,deadline,source_name,raw_text,"
+                "created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (case_id, seq, order_date, served_date, days, deadline, source_name, raw_text, t, t))
+            oid = cur.lastrowid
+            for i, it in enumerate(items):
+                iid = c.execute(
+                    "INSERT INTO correction_items(correction_id,no,heading,text,category,answer,sort_order) "
+                    "VALUES(?,?,?,?,?,?,?)",
+                    (oid, it["no"], it.get("heading") or None, it["text"], it.get("category"), it.get("answer") or "", i),
+                ).lastrowid
+                for d in it.get("docs") or []:
+                    c.execute("INSERT INTO correction_docs(item_id,name) VALUES(?,?)", (iid, d))
+            self.log(case_id, user_id, "보정명령 등록", {"차수": seq, "항목": len(items), "기한": deadline})
+            return oid
+
+    def corrections(self, case_id) -> list[dict]:
+        return self.q("SELECT c.*, u.name AS approved_by_name FROM corrections c LEFT JOIN users u "
+                      "ON u.id=c.approved_by WHERE c.case_id=? ORDER BY c.seq DESC", (case_id,))
+
+    def get_correction(self, oid) -> dict | None:
+        return self.one("SELECT c.*, u.name AS approved_by_name FROM corrections c LEFT JOIN users u "
+                        "ON u.id=c.approved_by WHERE c.id=?", (oid,))
+
+    def open_corrections(self) -> list[dict]:
+        """제출하지 않은 보정명령 전체 (기한 알림용)."""
+        return self.q("SELECT c.id, c.case_id, c.seq, c.deadline, c.status, k.debtor_name, k.case_no "
+                      "FROM corrections c JOIN cases k ON k.id=c.case_id WHERE c.status != '제출 완료' "
+                      "ORDER BY c.deadline IS NULL, c.deadline")
+
+    def correction_items(self, oid) -> list[dict]:
+        return self.q("SELECT * FROM correction_items WHERE correction_id=? ORDER BY sort_order, id", (oid,))
+
+    def correction_docs(self, oid) -> dict[int, list[dict]]:
+        out: dict[int, list[dict]] = {}
+        for r in self.q("SELECT d.* FROM correction_docs d JOIN correction_items i ON i.id=d.item_id "
+                        "WHERE i.correction_id=? ORDER BY d.id", (oid,)):
+            out.setdefault(r["item_id"], []).append(r)
+        return out
+
+    def _corr_changed(self, oid, user_id, reason):
+        o = self.one("SELECT case_id, status FROM corrections WHERE id=?", (oid,))
+        self.conn.execute("UPDATE corrections SET updated_at=? WHERE id=?", (now(), oid))
+        if o["status"] in ("검토 요청", "변호사 승인"):
+            self.conn.execute("UPDATE corrections SET status='작성 중', approved_by=NULL, approved_at=NULL WHERE id=?",
+                              (oid,))
+            self.log(o["case_id"], user_id, "보정 상태 되돌림", f"{o['status']} → 작성 중 (사유: {reason})")
+        return o["case_id"]
+
+    def update_correction(self, oid, user_id, **f):
+        cols = {k: v for k, v in f.items() if k in ("order_date", "served_date", "days", "deadline", "memo")}
+        if not cols:
+            return
+        o = self.one("SELECT case_id FROM corrections WHERE id=?", (oid,))
+        with self.tx() as c:
+            c.execute(f"UPDATE corrections SET {','.join(f'{k}=?' for k in cols)}, updated_at=? WHERE id=?",
+                      (*cols.values(), now(), oid))
+            self.log(o["case_id"], user_id, "보정명령 정보 수정", cols)
+
+    def delete_correction(self, oid, user_id):
+        o = self.one("SELECT case_id, seq FROM corrections WHERE id=?", (oid,))
+        with self.tx() as c:
+            c.execute("DELETE FROM corrections WHERE id=?", (oid,))
+            self.log(o["case_id"], user_id, "보정명령 삭제", f"{o['seq']}차")
+
+    def update_item(self, item_id, user_id, **f):
+        cols = {k: v for k, v in f.items() if k in ("no", "heading", "text", "category", "answer")}
+        it = self.one("SELECT correction_id, no FROM correction_items WHERE id=?", (item_id,))
+        with self.tx() as c:
+            c.execute(f"UPDATE correction_items SET {','.join(f'{k}=?' for k in cols)} WHERE id=?",
+                      (*cols.values(), item_id))
+            cid = self._corr_changed(it["correction_id"], user_id, f"{it['no']}번 항목 수정")
+            self.log(cid, user_id, "보정 항목 수정", {"항목": it["no"], **{k: (v[:60] if isinstance(v, str) else v)
+                                                                          for k, v in cols.items()}})
+
+    def add_item(self, oid, user_id, no, text, category=None, heading=None) -> int:
+        mx = self.one("SELECT COALESCE(MAX(sort_order),0)+1 n FROM correction_items WHERE correction_id=?", (oid,))["n"]
+        with self.tx() as c:
+            iid = c.execute("INSERT INTO correction_items(correction_id,no,heading,text,category,answer,sort_order) "
+                            "VALUES(?,?,?,?,?,'',?)", (oid, no, heading, text, category, mx)).lastrowid
+            cid = self._corr_changed(oid, user_id, "항목 추가")
+            self.log(cid, user_id, "보정 항목 추가", no)
+            return iid
+
+    def delete_item(self, item_id, user_id):
+        it = self.one("SELECT correction_id, no FROM correction_items WHERE id=?", (item_id,))
+        with self.tx() as c:
+            c.execute("DELETE FROM correction_items WHERE id=?", (item_id,))
+            cid = self._corr_changed(it["correction_id"], user_id, "항목 삭제")
+            self.log(cid, user_id, "보정 항목 삭제", it["no"])
+
+    def add_doc(self, item_id, user_id, name) -> int:
+        it = self.one("SELECT correction_id FROM correction_items WHERE id=?", (item_id,))
+        with self.tx() as c:
+            did = c.execute("INSERT INTO correction_docs(item_id,name) VALUES(?,?)", (item_id, name.strip())).lastrowid
+            cid = self._corr_changed(it["correction_id"], user_id, "서류 추가")
+            self.log(cid, user_id, "보정 서류 추가", name)
+            return did
+
+    def update_doc(self, doc_id, user_id, **f):
+        cols = {k: v for k, v in f.items() if k in ("name", "status", "requested_at", "received_at", "note")}
+        d = self.one("SELECT d.name, i.correction_id FROM correction_docs d JOIN correction_items i ON i.id=d.item_id "
+                     "WHERE d.id=?", (doc_id,))
+        with self.tx() as c:
+            c.execute(f"UPDATE correction_docs SET {','.join(f'{k}=?' for k in cols)} WHERE id=?",
+                      (*cols.values(), doc_id))
+            cid = self._corr_changed(d["correction_id"], user_id, "서류 상태 변경")
+            self.log(cid, user_id, "보정 서류 변경", {"서류": d["name"], **cols})
+
+    def delete_doc(self, doc_id, user_id):
+        d = self.one("SELECT d.name, i.correction_id FROM correction_docs d JOIN correction_items i ON i.id=d.item_id "
+                     "WHERE d.id=?", (doc_id,))
+        with self.tx() as c:
+            c.execute("DELETE FROM correction_docs WHERE id=?", (doc_id,))
+            cid = self._corr_changed(d["correction_id"], user_id, "서류 삭제")
+            self.log(cid, user_id, "보정 서류 삭제", d["name"])
+
+    def set_correction_status(self, oid, user: dict, status: str, blockers: list[str] | None = None):
+        """작성 중 → 검토 요청(누구나) → 변호사 승인(변호사만, 막는 사항 없을 때) → 제출 완료(승인 뒤)."""
+        o = self.get_correction(oid)
+        if status == "변호사 승인":
+            if user["role"] != ROLE_LAWYER:
+                raise PermissionError("변호사 계정만 보정서 답변을 승인할 수 있습니다.")
+            if o["status"] != "검토 요청":
+                raise PermissionError("'검토 요청' 상태에서만 승인할 수 있습니다.")
+            if blockers:
+                raise PermissionError("승인할 수 없습니다: " + " / ".join(blockers))
+        if status == "제출 완료" and o["status"] != "변호사 승인":
+            raise PermissionError("변호사 승인 뒤에만 제출 완료로 바꿀 수 있습니다.")
+        if status == "검토 요청" and o["status"] != "작성 중":
+            raise PermissionError("'작성 중' 상태에서만 검토 요청할 수 있습니다.")
+        with self.tx() as c:
+            if status == "변호사 승인":
+                c.execute("UPDATE corrections SET status=?, approved_by=?, approved_at=? WHERE id=?",
+                          (status, user["id"], now(), oid))
+            elif status == "제출 완료":
+                c.execute("UPDATE corrections SET status=?, submitted_at=? WHERE id=?", (status, now(), oid))
+            else:
+                c.execute("UPDATE corrections SET status=?, approved_by=NULL, approved_at=NULL, submitted_at=NULL "
+                          "WHERE id=?", (status, oid))
+            self.log(o["case_id"], user["id"], "보정 상태 변경", f"{o['seq']}차: {o['status']} → {status}")
 
     # ---------- 경고 확인 기록 ----------
     def acks(self, case_id) -> dict[str, dict]:

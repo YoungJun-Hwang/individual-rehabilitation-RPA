@@ -11,6 +11,8 @@ def at(tmp_path, monkeypatch):
     monkeypatch.setenv("CREDITOR_DB", str(tmp_path / "t.db"))
     import importlib, core.db
     importlib.reload(core.db)
+    import streamlit as st
+    st.cache_resource.clear()   # 앞 테스트의 DB 연결이 남지 않게
     a = AppTest.from_file(APP, default_timeout=30)
     a.run()
     return a

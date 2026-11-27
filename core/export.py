@@ -275,3 +275,30 @@ def creditor_list_hwp(case: dict, rows: list[dict], totals: dict, draft: bool,
                 tmp.unlink()
             except OSError:
                 pass
+
+
+def html_to_hwp(html_text: str, out: Path) -> Path:
+    """HTML 문서를 한글로 열어 HWP로 저장합니다 (보정서 등). Windows + 한컴오피스 필요."""
+    ok, why = hwp_available()
+    if not ok:
+        raise HwpUnavailable(why)
+    out = Path(out).resolve()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out.with_suffix(".html")
+    tmp.write_text(html_text, encoding="utf-8")
+    hwp = _open_hwp()
+    try:
+        if not hwp.Open(str(tmp), "HTML", "forceopen:true"):
+            raise HwpUnavailable("HTML을 한글로 열지 못했습니다.")
+        hwp.SaveAs(str(out), "HWP", "")
+        return out
+    finally:
+        try:
+            hwp.Clear(1)
+            hwp.Quit()
+        except Exception:
+            pass
+        try:
+            tmp.unlink()
+        except OSError:
+            pass

@@ -7,11 +7,12 @@ from __future__ import annotations
 
 import re
 from datetime import date, datetime
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 
-from core import credit_pdf, debt_cert, export, listing, ocr, rules
+from core import correction, credit_pdf, debt_cert, export, listing, ocr, rules
 from core.db import (DB, DEBT_CERT_STATES, ROLE_ADMIN, ROLE_LAWYER, ROLE_STAFF, ROLES,
                      STATUS_APPROVED, STATUS_DRAFT, STATUS_REVIEW, STATUSES)
 
@@ -114,8 +115,28 @@ def login_screen():
 
 
 # ---------------- 화면: 사건 목록 ----------------
+def deadline_board():
+    opens = db.open_corrections()
+    if not opens:
+        return
+    st.subheader("⏰ 보정 기한")
+    for o in opens[:10]:
+        n = correction.d_day(o["deadline"])
+        color = "red" if n is not None and n <= 3 else ("orange" if n is not None and n <= 7 else "gray")
+        c1, c2 = st.columns([5, 1])
+        c1.markdown(f":{color}[**{correction.d_day_label(n)}**] · {o['debtor_name']} ({o['case_no'] or '번호 없음'}) · "
+                    f"{o['seq']}차 보정 · 기한 {o['deadline'] or '미정'} · {o['status']}")
+        if c2.button("보정 열기", key=f"dl_{o['id']}"):
+            ss.case_id = o["case_id"]
+            ss.page = "보정명령"
+            ss[f"corrsel_{o['case_id']}"] = o["id"]
+            st.rerun()
+    st.divider()
+
+
 def page_cases():
     st.header("사건 목록")
+    deadline_board()
     c1, c2 = st.columns([3, 1])
     kw = c1.text_input("검색 (채무자 이름, 사건번호)")
     stf = c2.selectbox("진행 상태", ["전체"] + STATUSES)
@@ -125,7 +146,7 @@ def page_cases():
             "id": "ID", "case_no": "사건번호", "debtor_name": "채무자", "court": "법원", "status": "상태",
             "updated_at": "최근 수정", "lawyer_name": "담당 변호사", "creditor_count": "채권자 수"})
         st.dataframe(df[["ID", "사건번호", "채무자", "법원", "담당 변호사", "채권자 수", "상태", "최근 수정"]],
-                     hide_index=True, use_container_width=True)
+                     hide_index=True, width="stretch")
         opts = {f"{c['debtor_name']} ({c['case_no'] or '번호 없음'}) · {c['status']}": c["id"] for c in cases}
         pick = st.selectbox("열 사건", list(opts))
         if st.button("이 사건 열기", type="primary"):
@@ -298,7 +319,7 @@ def page_creditors(case):
                         "이자": amt_str(c["interest"]) or "미확인", "지연손해금": amt_str(c["late_fee"]) or "미확인",
                         "합계": listing.fmt_amount(rules.claim_total(c)), "기준일": c["amount_base_date"] or "미확인",
                         "양도 이력": c["transferred_from"] or ""} for c in cls])
-                    st.dataframe(df, hide_index=True, use_container_width=True)
+                    st.dataframe(df, hide_index=True, width="stretch")
                     ed = st.selectbox("수정할 채권", ["새 채권 추가"] + [f"{j}. {c['cause'] or '원인 미기재'}"
                                                                     for j, c in enumerate(cls, start=1)],
                                       key=f"pick_{cr['id']}")
@@ -383,7 +404,7 @@ def pdf_import(case):
         left, right = st.columns([3, 2])
         with left:
             edited = st.data_editor(
-                df, hide_index=True, use_container_width=True, key=f"ed_{case['id']}",
+                df, hide_index=True, width="stretch", key=f"ed_{case['id']}",
                 disabled=["구분", "쪽", "메모", "원문"],
                 column_config={"가져오기": st.column_config.CheckboxColumn(width="small"),
                                "금액": st.column_config.NumberColumn("금액(원)", format="localized", step=1),
@@ -394,7 +415,7 @@ def pdf_import(case):
                 if len(pages) > 1 else pages[0]
             boxes = [(tuple(c["bbox"]) if c["bbox"] else None, bool(edited.iloc[i]["가져오기"]))
                      for i, c in enumerate(stt["cands"]) if c["page"] == pg]
-            st.image(credit_pdf.render_page(stt["data"], pg, boxes, stt["pw"]), use_container_width=True)
+            st.image(credit_pdf.render_page(stt["data"], pg, boxes, stt["pw"]), width="stretch")
         chosen = edited[edited["가져오기"]]
         c1, c2 = st.columns([1, 4])
         if c1.button(f"선택한 {len(chosen)}건 가져오기", type="primary", disabled=chosen.empty):
@@ -431,7 +452,7 @@ def page_credit(case):
                 matched = f"{via['creditor_name']} (양수)" if via else None
             rows.append({"기관": it["institution"], "상품": it["product"] or "", "금액": amt_str(it["amount"]),
                          "목록 대응": matched or "❌ 없음", "비고": it["note"] or ""})
-        st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+        st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
         pick = st.selectbox("삭제할 항목", ["선택 안 함"] + [f"{i + 1}. {it['institution']}" for i, it in enumerate(items)])
         if pick != "선택 안 함" and st.button("삭제"):
             db.delete_credit_item(items[int(pick.split(".")[0]) - 1]["id"], ss.user["id"])
@@ -514,7 +535,7 @@ def page_agency(case):
                         "요청일": c["debt_cert_requested_at"] or "", "수령일": c["debt_cert_received_at"] or ""}
                        for c in creditors])
     edited = st.data_editor(
-        df, hide_index=True, use_container_width=True, disabled=["id", "기관명"],
+        df, hide_index=True, width="stretch", disabled=["id", "기관명"],
         column_config={"id": None, "상태": st.column_config.SelectboxColumn("상태", options=DEBT_CERT_STATES, required=True),
                        "요청일": st.column_config.TextColumn("요청일 (예: 2026-11-20)"),
                        "수령일": st.column_config.TextColumn("수령일")},
@@ -638,7 +659,7 @@ def page_debt_cert(case):
                      "증명서 합계": listing.fmt_amount(c["total"]), "입력된 채권 합계": listing.fmt_amount(s),
                      "대조": state or "(이전 증명서)", "채권 반영": "예" if c["applied"] else "아니오",
                      "파일": c["source_name"], "등록": f"{c['user_name']} {c['created_at']}"})
-    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+    st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
     with st.expander("증명서 기록 삭제"):
         pick = st.selectbox("삭제할 기록", [f"{c['id']}: {c['creditor_name']} · {c['source_name']}" for c in certs])
         if st.button("기록 삭제"):
@@ -683,7 +704,7 @@ def _review_cert(case, queue, creditors):
             df[v] = pd.to_numeric(df[v], errors="coerce")   # 빈칸을 'None' 대신 빈칸으로 표시
         st.markdown("**증명서에서 읽은 계약** — 원문과 다르면 칸을 직접 고치세요. 계약을 더하거나 뺄 수도 있습니다.")
         edited = st.data_editor(
-            df, hide_index=True, use_container_width=True, num_rows="dynamic", key=f"cert_ed_{cid}_{item['name']}_{cr_id}",
+            df, hide_index=True, width="stretch", num_rows="dynamic", key=f"cert_ed_{cid}_{item['name']}_{cr_id}",
             column_config={**{v: st.column_config.NumberColumn(v, format="localized", step=1) for v in CERT_COLS.values()},
                            "반영할 채권": st.column_config.SelectboxColumn(options=options, required=True)})
         rows = []
@@ -714,7 +735,7 @@ def _review_cert(case, queue, creditors):
         cmp = debt_cert.compare(summary, claims)
         st.dataframe(pd.DataFrame([{k: (listing.fmt_amount(v) if k != "항목" else v) if k != "차이" else
                                     ("" if v is None else ("✅ 0" if v == 0 else f"{v:+,}")) for k, v in r.items()}
-                                   for r in cmp]), hide_index=True, use_container_width=True)
+                                   for r in cmp]), hide_index=True, width="stretch")
         if summary.other:
             st.info(f"증명서에 기타(비용·수수료 등) {summary.other:,}원이 있습니다. 채권 칸에는 원금·이자·지연손해금만 "
                     "들어가므로, 반영하면 이 금액만큼 차이가 남습니다. 처리 방법은 변호사와 정하세요.")
@@ -741,7 +762,7 @@ def _review_cert(case, queue, creditors):
         pn = st.selectbox("원문 쪽", list(range(1, len(pages) + 1)), format_func=lambda p: f"{p}쪽",
                           key=f"cert_pg_{cid}_{item['name']}") if len(pages) > 1 else 1
         marks = [(bbox, color) for p, bbox, color in res.marks if p == pn]
-        st.image(ocr.draw_boxes(pages[pn - 1], marks), use_container_width=True)
+        st.image(ocr.draw_boxes(pages[pn - 1], marks), width="stretch")
         st.caption("초록 = 금액을 읽은 줄, 주황 = 기준일, 회색 = 표 머리글" +
                    (" · 글자 인식(OCR)으로 읽음" if pages[pn - 1].ocr else " · 전자 문서에서 바로 읽음"))
         with st.expander("읽은 글 전체"):
@@ -794,7 +815,7 @@ def page_output(case):
     if not rows:
         st.info("채권자가 없습니다.")
         return
-    st.dataframe(pd.DataFrame(listing.display_rows(rows)), hide_index=True, use_container_width=True)
+    st.dataframe(pd.DataFrame(listing.display_rows(rows)), hide_index=True, width="stretch")
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("원금 합계", f"{totals['원금']:,}원")
     c2.metric("이자 합계", f"{totals['이자']:,}원")
@@ -869,6 +890,341 @@ def page_output(case):
                            file_name="채권자목록.html", mime="text/html")
 
 
+# ---------------- 화면: 보정명령 (4단계) ----------------
+def _upload_text(f) -> str:
+    pages = ocr.read_file(f.getvalue(), f.name)
+    return "\n".join(l.text for p in pages for l in p.lines)
+
+
+def page_corrections(case):
+    st.header("보정명령")
+    cid = case["id"]
+    orders = db.corrections(cid)
+    flash = ss.pop(f"corrflash_{cid}", None)
+    if flash:
+        st.success(flash)
+    if orders:
+        st.dataframe(pd.DataFrame([{
+            "차수": f"{o['seq']}차", "명령일": o["order_date"] or "", "송달일": o["served_date"] or "",
+            "기한": o["deadline"] or "미정",
+            "남은 날": correction.d_day_label(correction.d_day(o["deadline"])) if o["status"] != correction.C_SUBMITTED else "-",
+            "상태": o["status"], "항목": len(db.correction_items(o["id"]))} for o in orders]),
+            hide_index=True, width="stretch")
+    key = f"corrsel_{cid}"
+    opts = {f"{o['seq']}차 보정명령 ({o['status']})": o["id"] for o in orders}
+    labels = list(opts) + ["➕ 새 보정명령 등록"]
+    cur = ss.get(key)
+    idx = list(opts.values()).index(cur) if cur in opts.values() else (0 if orders else len(labels) - 1)
+    pick = st.selectbox("보정명령 선택", labels, index=idx)
+    if pick == labels[-1]:
+        ss[key] = None
+        _new_correction(case)
+    else:
+        ss[key] = opts[pick]
+        _correction_detail(case, db.get_correction(opts[pick]))
+
+
+def _new_correction(case):
+    cid = case["id"]
+    pkey = f"corrnew_{cid}"
+    pv = ss.get(pkey)
+    if pv is None:
+        st.caption("법원 보정명령문을 붙여 넣거나 파일(전자소송 PDF, 스캔본, 사진)을 올리세요. 번호(1., 가., ①)를 기준으로 "
+                   "항목을 나누고, 분류와 필요한 서류를 추천합니다.")
+        with st.form(f"corr_in_{cid}"):
+            f = st.file_uploader("보정명령 파일 (선택)", type=["pdf", "jpg", "jpeg", "png", "tif", "tiff"])
+            text = st.text_area("또는 명령문 붙여 넣기", height=220)
+            served = st.text_input("송달일 (받은 날, 예: 2026-11-20)", date.today().isoformat())
+            if st.form_submit_button("명령문 읽기", type="primary"):
+                try:
+                    raw = text.strip()
+                    if f is not None:
+                        with st.spinner("파일을 읽는 중..."):
+                            raw = (_upload_text(f) + "\n" + raw).strip()
+                    if not raw:
+                        raise ValueError("명령문을 붙여 넣거나 파일을 올리세요.")
+                    served_iso = parse_date(served)
+                    p = correction.parse_order(raw)
+                    ss[pkey] = {"raw": raw, "name": f.name if f else None, "parsed": p, "served": served_iso}
+                    st.rerun()
+                except (ValueError, ocr.OcrUnavailable) as e:
+                    st.error(str(e))
+        return
+
+    p = pv["parsed"]
+    st.markdown("#### 읽은 내용 확인")
+    if p.case_no and case["case_no"] and re.sub(r"\s", "", case["case_no"]) != p.case_no:
+        st.error(f"명령문의 사건번호({p.case_no})가 이 사건({case['case_no']})과 다릅니다. 다른 사건의 명령이 아닌지 확인하세요.")
+    elif p.case_no and not case["case_no"]:
+        st.info(f"명령문의 사건번호는 {p.case_no}입니다. 등록하면 이 사건의 사건번호로 저장합니다.")
+    c1, c2, c3, c4 = st.columns(4)
+    od = c1.text_input("명령일", p.order_date or "", key=f"cn_od_{cid}")
+    sv = c2.text_input("송달일", pv["served"] or "", key=f"cn_sv_{cid}")
+    days = c3.number_input("보정 기간(일)", min_value=0, value=p.days or 14, step=1, key=f"cn_days_{cid}")
+    try:
+        auto = correction.compute_deadline(parse_date(sv), int(days)) if parse_date(sv) and days else ""
+    except ValueError:
+        auto = ""
+    dl = c4.text_input("기한 (자동 계산, 고칠 수 있음)", auto, key=f"cn_dl_{cid}_{auto}")
+    st.caption("기한 = 송달일 다음 날부터 센 날. 마지막 날이 토·일·공휴일(config/holidays.json)이면 다음 평일. 참고용이니 확인하세요.")
+    cats = correction.categories()
+    df = pd.DataFrame([{"번호": i.no, "큰 제목": i.heading, "명령 내용": i.text, "분류": i.category,
+                        "필요 서류 (; 로 구분)": "; ".join(i.docs), "답변 초안": i.answer} for i in p.items])
+    st.markdown(f"**항목 {len(p.items)}개** — 잘못 나뉜 곳은 고치고, 행을 더하거나 지울 수 있습니다.")
+    ed = st.data_editor(df, hide_index=True, width="stretch", num_rows="dynamic", key=f"cn_ed_{cid}",
+                        column_config={"분류": st.column_config.SelectboxColumn(options=cats, required=True),
+                                       "명령 내용": st.column_config.TextColumn(width="large")})
+    with st.expander("명령문 원문"):
+        st.text(pv["raw"])
+    b1, b2 = st.columns([1, 5])
+    if b1.button("등록", type="primary"):
+        try:
+            items = []
+            for _, r in ed.iterrows():
+                text = str(r["명령 내용"] or "").strip()
+                if not text:
+                    continue
+                docs = [d.strip() for d in str(r["필요 서류 (; 로 구분)"] or "").split(";") if d.strip()]
+                items.append({"no": str(r["번호"] or len(items) + 1).strip(), "heading": str(r["큰 제목"] or "").strip(),
+                              "text": text, "category": r["분류"] or "기타", "answer": str(r["답변 초안"] or ""),
+                              "docs": docs})
+            if not items:
+                raise ValueError("항목이 없습니다.")
+            oid = db.create_correction(cid, ss.user["id"], order_date=parse_date(od), served_date=parse_date(sv),
+                                       days=int(days) or None, deadline=parse_date(dl), source_name=pv["name"],
+                                       raw_text=pv["raw"], items=items)
+            if p.case_no and not case["case_no"]:
+                db.update_case(cid, ss.user["id"], case_no=p.case_no)
+            del ss[pkey]
+            ss[f"corrsel_{cid}"] = oid
+            ss[f"corrflash_{cid}"] = f"보정명령을 등록했습니다 (항목 {len(items)}개)."
+            st.rerun()
+        except ValueError as e:
+            st.error(str(e))
+    if b2.button("취소"):
+        del ss[pkey]
+        st.rerun()
+
+
+def _correction_detail(case, o):
+    cid = case["id"]
+    oid = o["id"]
+    items = db.correction_items(oid)
+    docs = db.correction_docs(oid)
+    n = correction.d_day(o["deadline"])
+    head = f"**{o['seq']}차 보정명령** · 상태 {o['status']}"
+    if o["status"] != correction.C_SUBMITTED:
+        color = "red" if n is not None and n <= 3 else ("orange" if n is not None and n <= 7 else "gray")
+        head += f" · 기한 {o['deadline'] or '미정'} :{color}[**{correction.d_day_label(n)}**]"
+    else:
+        head += f" · 제출 {o['submitted_at']}"
+    st.markdown(head)
+    if o["approved_at"]:
+        st.caption(f"변호사 승인: {o['approved_by_name']} ({o['approved_at']})")
+    t1, t2, t3, t4 = st.tabs(["항목·답변", "자료 요청", "보정서", "원문·정보"])
+    with t1:
+        _tab_items(case, o, items, docs)
+    with t2:
+        _tab_docs(case, o, items, docs)
+    with t3:
+        _tab_reply(case, o, items, docs)
+    with t4:
+        _tab_info(case, o)
+
+
+def _tab_items(case, o, items, docs):
+    cats = correction.categories()
+    _, _, open_ = warnings_for(case["id"])
+    for it in items:
+        ds = docs.get(it["id"], [])
+        state = correction.item_state(it["answer"], ds)
+        icon = "✅" if state == "답변 작성됨" else ("📎" if "서류" in state or state == "자료 대기" else "✏️")
+        with st.expander(f"{icon} {it['no']} [{it['category'] or '기타'}] {state} — {it['text'][:60]}"):
+            if it["heading"]:
+                st.caption(it["heading"])
+            st.markdown(f"> {it['text']}")
+            if it["category"] == "채권자목록":
+                st.info(f"참고: 이 사건 채권자목록의 처리 안 된 누락 점검 경고 {len(open_)}건. "
+                        "채권자목록을 고친 뒤 '미리보기·출력'에서 수정본을 출력해 첨부하세요.")
+            if ds:
+                st.markdown("서류: " + ", ".join(f"{d['name']} ({d['status']})" for d in ds))
+            with st.form(f"it_{it['id']}"):
+                ans = st.text_area("답변", it["answer"] or "", height=120)
+                c1, c2 = st.columns(2)
+                cat = c1.selectbox("분류", cats, index=cats.index(it["category"]) if it["category"] in cats else len(cats) - 1)
+                txt = st.text_area("명령 내용 (잘못 읽었으면 고치기)", it["text"], height=80)
+                if st.form_submit_button("저장", type="primary"):
+                    db.update_item(it["id"], ss.user["id"], answer=ans, category=cat, text=txt.strip() or it["text"])
+                    st.rerun()
+            if st.checkbox("이 항목 삭제", key=f"itdelok_{it['id']}"):
+                if st.button("삭제", key=f"itdel_{it['id']}"):
+                    db.delete_item(it["id"], ss.user["id"])
+                    st.rerun()
+    with st.expander("➕ 항목 추가"):
+        with st.form(f"additem_{o['id']}", clear_on_submit=True):
+            c1, c2 = st.columns([1, 3])
+            no = c1.text_input("번호")
+            txt = c2.text_area("명령 내용")
+            if st.form_submit_button("추가") and txt.strip():
+                cat, _ = correction.classify(txt)
+                iid = db.add_item(o["id"], ss.user["id"], no.strip() or str(len(items) + 1), txt.strip(), cat)
+                for d in correction.suggest_docs(txt):
+                    db.add_doc(iid, ss.user["id"], d)
+                st.rerun()
+
+
+def _tab_docs(case, o, items, docs):
+    by_id = {it["id"]: it for it in items}
+    all_docs = [d for it in items for d in docs.get(it["id"], [])]
+    if all_docs:
+        df = pd.DataFrame([{"id": d["id"], "항목": by_id[d["item_id"]]["no"], "서류": d["name"], "상태": d["status"],
+                            "요청일": d["requested_at"] or "", "수령일": d["received_at"] or "", "메모": d["note"] or ""}
+                           for d in all_docs])
+        ed = st.data_editor(df, hide_index=True, width="stretch", disabled=["id", "항목"],
+                            key=f"docs_{o['id']}",
+                            column_config={"id": None, "상태": st.column_config.SelectboxColumn(
+                                options=correction.DOC_STATES, required=True)})
+        recv = sum(1 for d in all_docs if d["status"] in correction.DONE_DOC_STATES)
+        st.progress(recv / len(all_docs), text=f"받음·생략 {recv} / {len(all_docs)}")
+        c1, c2 = st.columns(2)
+        if c1.button("서류 상태 저장", type="primary"):
+            try:
+                for _, r in ed.iterrows():
+                    d = next(x for x in all_docs if x["id"] == r["id"])
+                    req, rec = parse_date(r["요청일"]), parse_date(r["수령일"])
+                    if r["상태"] == "받음" and not rec:
+                        rec = date.today().isoformat()
+                    if r["상태"] in ("요청함", "받음") and not req:
+                        req = d["requested_at"] or date.today().isoformat()
+                    if r["상태"] == "생략" and not str(r["메모"]).strip():
+                        raise ValueError(f"'{r['서류']}'을(를) 생략하려면 메모에 사유를 적으세요.")
+                    new = dict(name=str(r["서류"]).strip() or d["name"], status=r["상태"], requested_at=req,
+                               received_at=rec, note=str(r["메모"]).strip() or None)
+                    if any(new[k] != d[k] for k in new):
+                        db.update_doc(d["id"], ss.user["id"], **new)
+                st.rerun()
+            except ValueError as e:
+                st.error(str(e))
+        pick = c2.selectbox("서류 삭제", ["선택 안 함"] + [f"{d['id']}: {d['name']}" for d in all_docs],
+                            key=f"docdel_{o['id']}")
+        if pick != "선택 안 함" and c2.button("삭제", key=f"docdelbtn_{o['id']}"):
+            db.delete_doc(int(pick.split(":")[0]), ss.user["id"])
+            st.rerun()
+    else:
+        st.info("필요한 서류가 없습니다.")
+    with st.form(f"adddoc_{o['id']}", clear_on_submit=True):
+        c1, c2 = st.columns([1, 3])
+        it_no = c1.selectbox("항목", [it["no"] for it in items]) if items else None
+        name = c2.text_input("서류 이름")
+        if st.form_submit_button("서류 추가") and name.strip() and it_no:
+            db.add_doc(next(it["id"] for it in items if it["no"] == it_no), ss.user["id"], name)
+            st.rerun()
+
+    st.divider()
+    st.markdown("**의뢰인 안내문** (문자·카카오톡으로 보내기)")
+    msg = correction.client_message(case["debtor_name"], o["deadline"], all_docs)
+    if msg:
+        st.code(msg, language=None)
+        st.caption("오른쪽 위 복사 버튼으로 복사하세요. 마감일은 법원 기한보다 며칠 앞입니다(config/office.json).")
+        if st.button("보냈음: '요청 전' 서류를 '요청함'으로"):
+            for d in all_docs:
+                if d["status"] == "요청 전":
+                    db.update_doc(d["id"], ss.user["id"], status="요청함", requested_at=date.today().isoformat())
+            st.rerun()
+    else:
+        st.caption("요청할 서류가 없습니다.")
+
+
+def _tab_reply(case, o, items, docs):
+    user = ss.user
+    blockers = correction.approval_blockers(items, docs)
+    st.markdown("**검토 · 승인**")
+    if blockers and o["status"] in (correction.C_DRAFT, correction.C_REVIEW):
+        with st.container(border=True):
+            st.markdown("승인 전에 처리할 것:")
+            for b in blockers:
+                st.markdown(f"- {b}")
+    c1, c2, c3 = st.columns(3)
+    try:
+        if o["status"] == correction.C_DRAFT and c1.button("검토 요청", type="primary"):
+            db.set_correction_status(o["id"], user, correction.C_REVIEW)
+            st.rerun()
+        if o["status"] == correction.C_REVIEW:
+            if user["role"] == ROLE_LAWYER:
+                ok = st.checkbox("항목별 답변과 첨부 서류를 직접 확인했고, 이 내용으로 승인합니다.", key=f"capok_{o['id']}")
+                if c1.button("변호사 승인", type="primary", disabled=bool(blockers) or not ok):
+                    db.set_correction_status(o["id"], user, correction.C_APPROVED, blockers)
+                    st.rerun()
+            else:
+                c1.info("변호사 승인을 기다리는 중입니다.")
+        if o["status"] == correction.C_APPROVED and c2.button("제출 완료로 표시"):
+            db.set_correction_status(o["id"], user, correction.C_SUBMITTED)
+            st.rerun()
+        if o["status"] != correction.C_DRAFT and c3.button("작성 중으로 되돌리기"):
+            db.set_correction_status(o["id"], user, correction.C_DRAFT)
+            st.rerun()
+    except PermissionError as e:
+        st.error(str(e))
+    st.caption("승인 뒤 답변·서류를 고치면 자동으로 '작성 중'으로 돌아갑니다.")
+
+    st.divider()
+    draft = o["status"] not in (correction.C_APPROVED, correction.C_SUBMITTED)
+    if draft:
+        st.info("변호사 승인 전이라 **초안**으로 만들어집니다.")
+    h = correction.reply_html(case, o, items, docs, draft)
+    import streamlit.components.v1 as components
+    components.html(f"<div style='background:#fff;color:#000;padding:16px'>{h}</div>", height=600, scrolling=True)
+    tag = "_초안" if draft else ""
+    base = f"{case.get('case_no') or '사건'}_{case['debtor_name']}_{o['seq']}차보정서{tag}"
+    c1, c2, c3 = st.columns(3)
+    c1.download_button("HTML 받기", h.encode("utf-8"), file_name=f"{base}.html", mime="text/html")
+    c2.download_button("글(TXT) 받기 — 전자소송 붙여넣기용", correction.reply_text(case, o, items, docs).encode("utf-8"),
+                       file_name=f"{base}.txt", mime="text/plain")
+    ok, why = export.hwp_available()
+    if c3.button("HWP 만들기", disabled=not ok, help=None if ok else why):
+        try:
+            out = export.html_to_hwp(h, export.OUTPUT_DIR / f"{base}.hwp")
+            db.log(case["id"], user["id"], "보정서 HWP 출력", {"파일": out.name, "초안": draft})
+            db.conn.commit()
+            ss[f"corrhwp_{o['id']}"] = str(out)
+        except Exception as e:
+            st.error(f"HWP 출력 실패: {e}")
+    if not ok:
+        c3.caption(why)
+    hp = ss.get(f"corrhwp_{o['id']}")
+    if hp and Path(hp).exists():
+        st.download_button("방금 만든 HWP 받기", Path(hp).read_bytes(), file_name=Path(hp).name)
+
+
+def _tab_info(case, o):
+    with st.form(f"corrinfo_{o['id']}"):
+        c1, c2, c3, c4 = st.columns(4)
+        od = c1.text_input("명령일", o["order_date"] or "")
+        sv = c2.text_input("송달일", o["served_date"] or "")
+        days = c3.number_input("보정 기간(일)", min_value=0, value=o["days"] or 0, step=1)
+        dl = c4.text_input("기한 (비우면 송달일·기간으로 계산)", o["deadline"] or "")
+        memo = st.text_area("메모", o["memo"] or "")
+        if st.form_submit_button("저장"):
+            try:
+                sv_iso = parse_date(sv)
+                dl_iso = parse_date(dl) or (correction.compute_deadline(sv_iso, int(days)) if sv_iso and days else None)
+                db.update_correction(o["id"], ss.user["id"], order_date=parse_date(od), served_date=sv_iso,
+                                     days=int(days) or None, deadline=dl_iso, memo=memo.strip() or None)
+                st.rerun()
+            except ValueError as e:
+                st.error(str(e))
+    with st.expander("명령문 원문"):
+        st.text(o["raw_text"] or "")
+        if o["source_name"]:
+            st.caption(f"파일: {o['source_name']}")
+    with st.expander("이 보정명령 삭제"):
+        if st.checkbox("항목·서류 기록이 모두 지워집니다. 삭제를 확인합니다.", key=f"cdel_{o['id']}"):
+            if st.button("보정명령 삭제"):
+                db.delete_correction(o["id"], ss.user["id"])
+                ss[f"corrsel_{case['id']}"] = None
+                st.rerun()
+
+
 # ---------------- 화면: 변경 기록 ----------------
 def page_audit(case):
     st.header("변경 기록")
@@ -877,7 +1233,7 @@ def page_audit(case):
     if log:
         st.dataframe(pd.DataFrame(log).rename(columns={"at": "일시", "user": "사용자", "role": "역할",
                                                       "action": "작업", "detail": "내용"}),
-                     hide_index=True, use_container_width=True)
+                     hide_index=True, width="stretch")
 
 
 # ---------------- 화면: 계정 관리 ----------------
@@ -906,10 +1262,11 @@ def page_users():
 
 # ---------------- 메인 ----------------
 CASE_PAGES = ["사건 기본정보", "채무 문진", "채권자 입력", "신용정보 대조", "발급대행 요청 목록", "부채증명서 대조",
-              "누락 점검", "미리보기·출력", "변경 기록"]
+              "누락 점검", "미리보기·출력", "보정명령", "변경 기록"]
 PAGE_FUNCS = {"사건 기본정보": page_basic, "채무 문진": page_questionnaire, "채권자 입력": page_creditors,
               "신용정보 대조": page_credit, "누락 점검": page_check, "발급대행 요청 목록": page_agency,
-              "부채증명서 대조": page_debt_cert, "미리보기·출력": page_output, "변경 기록": page_audit}
+              "부채증명서 대조": page_debt_cert, "미리보기·출력": page_output, "보정명령": page_corrections,
+              "변경 기록": page_audit}
 
 
 def main():
@@ -929,7 +1286,7 @@ def main():
                 del ss[k]
             st.rerun()
         st.divider()
-        if st.button("📁 사건 목록", use_container_width=True):
+        if st.button("📁 사건 목록", width="stretch"):
             ss.page = "사건 목록"
             st.rerun()
         case = db.get_case(ss.case_id) if ss.case_id else None
@@ -940,12 +1297,18 @@ def main():
             st.markdown(status_badge(case["status"]))
             for p in CASE_PAGES:
                 label = p + (f"  ⚠️{len(open_)}" if p == "누락 점검" and open_ else "")
-                if st.button(label, use_container_width=True, type="primary" if ss.page == p else "secondary",
+                if p == "보정명령":
+                    ds = [correction.d_day(o["deadline"]) for o in db.corrections(case["id"])
+                          if o["status"] != correction.C_SUBMITTED]
+                    ds = [d for d in ds if d is not None]
+                    if ds:
+                        label += f"  ⏰{correction.d_day_label(min(ds))}"
+                if st.button(label, width="stretch", type="primary" if ss.page == p else "secondary",
                              key=f"nav_{p}"):
                     ss.page = p
                     st.rerun()
         st.divider()
-        if st.button("👤 계정 관리", use_container_width=True):
+        if st.button("👤 계정 관리", width="stretch"):
             ss.page = "계정 관리"
             st.rerun()
         st.caption("자료는 이 PC의 data/cases.db에만 저장됩니다. 백업은 이 파일을 복사하세요.")
