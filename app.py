@@ -11,7 +11,7 @@ from datetime import date, datetime
 import pandas as pd
 import streamlit as st
 
-from core import export, listing, rules
+from core import credit_pdf, export, listing, rules
 from core.db import (DB, DEBT_CERT_STATES, ROLE_ADMIN, ROLE_LAWYER, ROLE_STAFF, ROLES,
                      STATUS_APPROVED, STATUS_DRAFT, STATUS_REVIEW, STATUSES)
 
@@ -339,10 +339,86 @@ def page_creditors(case):
 
 
 # ---------------- 화면: 신용정보 대조 ----------------
+def pdf_import(case):
+    """2단계: 신용정보조회서 PDF 자동 읽기. 읽은 결과는 후보로만 보여 주고, 원문과 대조해 고른 것만 저장."""
+    key = f"pdf_{case['id']}"
+    flash = ss.pop(f"flash_{case['id']}", None)
+    if flash:
+        st.success(flash)
+    stt = ss.get(key)
+    with st.expander("📄 PDF에서 자동으로 읽기", expanded=stt is not None):
+        if stt is None:
+            up = st.file_uploader("신용정보조회서 PDF", type=["pdf"], key=f"up_{case['id']}")
+            pw = st.text_input("PDF 비밀번호 (걸려 있을 때만)", type="password", key=f"pw_{case['id']}")
+            st.caption("파일은 메모리에서만 읽고 저장하지 않습니다. 읽은 결과는 바로 저장되지 않고, "
+                       "원문과 대조해 고른 항목만 저장됩니다.")
+            if st.button("읽기", type="primary", disabled=up is None):
+                data = up.getvalue()
+                try:
+                    res = credit_pdf.parse(data, pw or None)
+                except credit_pdf.PasswordRequired as e:
+                    st.error(f"{e} 비밀번호를 넣고 다시 '읽기'를 누르세요.")
+                    return
+                except ValueError as e:
+                    st.error(str(e))
+                    return
+                ss[key] = {"name": up.name, "data": data, "pw": pw or None, "pages": res.page_count,
+                           "notes": res.notes, "cands": [c.as_dict() for c in res.candidates]}
+                st.rerun()
+            return
+
+        st.markdown(f"**{stt['name']}** · {stt['pages']}쪽 · 후보 {len(stt['cands'])}건")
+        for n in stt["notes"]:
+            st.warning(n)
+        if not stt["cands"]:
+            if st.button("다른 파일 올리기"):
+                del ss[key]
+                st.rerun()
+            return
+        st.caption("초록 칸은 가져올 항목, 회색 칸은 제외한 항목입니다. 원문 그림과 대조해 '가져오기'를 고르고, "
+                   "잘못 읽은 칸은 표에서 바로 고치세요. 금액은 원 단위입니다.")
+        df = pd.DataFrame([{"가져오기": c["include"], "기관명": c["institution"], "금액": c["amount"],
+                            "메모": c["reason"], "상품": c["product"] or "", "일자": c["date"] or "",
+                            "구분": c["section"], "쪽": c["page"], "원문": c["raw"]} for c in stt["cands"]])
+        left, right = st.columns([3, 2])
+        with left:
+            edited = st.data_editor(
+                df, hide_index=True, use_container_width=True, key=f"ed_{case['id']}",
+                disabled=["구분", "쪽", "메모", "원문"],
+                column_config={"가져오기": st.column_config.CheckboxColumn(width="small"),
+                               "금액": st.column_config.NumberColumn("금액(원)", format="localized", step=1),
+                               "쪽": st.column_config.NumberColumn(width="small")})
+        with right:
+            pages = sorted({c["page"] for c in stt["cands"]})
+            pg = st.selectbox("원문 쪽", pages, format_func=lambda p: f"{p}쪽", key=f"pg_{case['id']}") \
+                if len(pages) > 1 else pages[0]
+            boxes = [(tuple(c["bbox"]) if c["bbox"] else None, bool(edited.iloc[i]["가져오기"]))
+                     for i, c in enumerate(stt["cands"]) if c["page"] == pg]
+            st.image(credit_pdf.render_page(stt["data"], pg, boxes, stt["pw"]), use_container_width=True)
+        chosen = edited[edited["가져오기"]]
+        c1, c2 = st.columns([1, 4])
+        if c1.button(f"선택한 {len(chosen)}건 가져오기", type="primary", disabled=chosen.empty):
+            items = []
+            for i, r in chosen.iterrows():
+                src = stt["cands"][i]
+                amt = None if pd.isna(r["금액"]) else int(r["금액"])
+                note = " · ".join(x for x in [f"PDF {src['page']}쪽", src["section"], r["일자"]] if x)
+                items.append({"institution": str(r["기관명"]).strip(), "product": str(r["상품"]).strip() or None,
+                              "amount": amt, "note": note})
+            added, skipped = db.import_credit_items(case["id"], ss.user["id"], items, stt["name"])
+            del ss[key]
+            ss[f"flash_{case['id']}"] = (f"{added}건을 가져왔습니다." +
+                                         (f" (같은 기관·금액이 이미 있어 {skipped}건은 건너뜀)" if skipped else ""))
+            st.rerun()
+        if c2.button("취소"):
+            del ss[key]
+            st.rerun()
+
+
 def page_credit(case):
     st.header("신용정보조회서 항목")
-    st.caption("신용정보조회서에 나온 기관을 입력합니다. 채권자목록에 없는 기관이 있으면 누락 점검에서 경고가 뜹니다. "
-               "(PDF 자동 읽기는 2단계에서 추가 예정)")
+    st.caption("신용정보조회서에 나온 기관을 입력합니다. 채권자목록에 없는 기관이 있으면 누락 점검에서 경고가 뜹니다.")
+    pdf_import(case)
     items = db.credit_items(case["id"])
     creditors = db.creditors(case["id"])
     claims = db.claims(case["id"])

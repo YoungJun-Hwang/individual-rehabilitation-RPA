@@ -170,3 +170,14 @@ def test_hwp_unavailable_on_linux():
     import sys
     if sys.platform != "win32":
         assert not ok and "Windows" in why
+
+
+def test_import_credit_items_dedupes(env):
+    db, s, l, cid = env
+    db.add_credit_item(cid, s["id"], "(주)국민은행", amount=100)
+    items = [{"institution": "국민은행", "amount": 100}, {"institution": "신한카드", "amount": 5},
+             {"institution": "신한카드", "amount": 5}, {"institution": " ", "amount": 1}]
+    added, skipped = db.import_credit_items(cid, s["id"], items, "a.pdf")
+    assert (added, skipped) == (1, 3)
+    assert [i["institution"] for i in db.credit_items(cid)] == ["(주)국민은행", "신한카드"]
+    assert any(a["action"] == "신용정보 PDF 가져오기" for a in db.audit(cid))

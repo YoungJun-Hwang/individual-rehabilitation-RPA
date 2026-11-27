@@ -392,6 +392,30 @@ class DB:
             self.log(case_id, user_id, "신용정보 항목 추가", institution)
             return cur.lastrowid
 
+    def import_credit_items(self, case_id, user_id, items: list[dict], source: str) -> tuple[int, int]:
+        """PDF에서 고른 항목을 한꺼번에 저장. 같은 기관·같은 금액이 이미 있으면 건너뜀.
+        돌려주는 값: (추가 건수, 건너뛴 건수)"""
+        from .rules import normalize_name
+        existing = {(normalize_name(r["institution"]), r["amount"]) for r in self.credit_items(case_id)}
+        added = skipped = 0
+        with self.tx() as c:
+            for it in items:
+                key = (normalize_name(it["institution"]), it.get("amount"))
+                if not it["institution"].strip() or key in existing:
+                    skipped += 1
+                    continue
+                existing.add(key)
+                c.execute(
+                    "INSERT INTO credit_report_items(case_id,institution,product,amount,note) VALUES(?,?,?,?,?)",
+                    (case_id, it["institution"].strip(), it.get("product"), it.get("amount"), it.get("note")),
+                )
+                added += 1
+            if added:
+                self.touch(case_id, user_id, "신용정보 PDF 가져오기")
+            self.log(case_id, user_id, "신용정보 PDF 가져오기",
+                     {"파일": source, "추가": added, "건너뜀": skipped})
+        return added, skipped
+
     def delete_credit_item(self, item_id, user_id):
         row = self.one("SELECT case_id, institution FROM credit_report_items WHERE id=?", (item_id,))
         with self.tx() as c:
