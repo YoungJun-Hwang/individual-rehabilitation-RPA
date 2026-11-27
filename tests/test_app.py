@@ -60,6 +60,10 @@ def test_full_flow(at):
     at.selectbox[0].select("card")
     form_btn(at, "채권 추가").click().run()
     assert not at.exception, at.exception
+    # 부채증명서 대조 화면이 열림
+    btn(at, "부채증명서 대조").click().run()
+    assert not at.exception, at.exception
+    assert any(h.value == "부채증명서 대조" for h in at.header)
     # 누락 점검: R2(세금), R3(부채증명서), R6(빈칸)
     btn(at, "누락 점검").click().run()
     md = " ".join(m.value for m in at.markdown)

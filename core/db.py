@@ -94,6 +94,23 @@ CREATE TABLE IF NOT EXISTS credit_report_items (
     amount INTEGER,
     note TEXT
 );
+CREATE TABLE IF NOT EXISTS debt_certs (
+    id INTEGER PRIMARY KEY,
+    case_id INTEGER NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
+    creditor_id INTEGER NOT NULL REFERENCES creditors(id) ON DELETE CASCADE,
+    source_name TEXT,
+    base_date TEXT,
+    principal INTEGER,
+    interest INTEGER,
+    late_fee INTEGER,
+    other INTEGER,
+    total INTEGER,
+    contracts_json TEXT,
+    ocr_text TEXT,
+    applied INTEGER NOT NULL DEFAULT 0,
+    user_id INTEGER REFERENCES users(id),
+    created_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS warning_acks (
     case_id INTEGER NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
     warning_id TEXT NOT NULL,
@@ -422,6 +439,46 @@ class DB:
             c.execute("DELETE FROM credit_report_items WHERE id=?", (item_id,))
             self.touch(row["case_id"], user_id, "신용정보 항목 삭제")
             self.log(row["case_id"], user_id, "신용정보 항목 삭제", row["institution"])
+
+    # ---------- 부채증명서 (3단계) ----------
+    def save_debt_cert(self, case_id, creditor_id, user_id, *, source_name, base_date, principal, interest,
+                       late_fee, other, total, contracts, ocr_text, applied: bool) -> int:
+        """증명서에서 읽은 값을 남기고, 그 채권자의 부채증명서 상태를 '수령'으로 바꿉니다."""
+        cr = self.one("SELECT name, debt_cert_status, debt_cert_requested_at FROM creditors WHERE id=?", (creditor_id,))
+        today = now()[:10]
+        with self.tx() as c:
+            cur = c.execute(
+                "INSERT INTO debt_certs(case_id,creditor_id,source_name,base_date,principal,interest,late_fee,other,"
+                "total,contracts_json,ocr_text,applied,user_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (case_id, creditor_id, source_name, base_date, principal, interest, late_fee, other, total,
+                 json.dumps(contracts, ensure_ascii=False), ocr_text, int(applied), user_id, now()),
+            )
+            if cr["debt_cert_status"] != "수령":
+                c.execute("UPDATE creditors SET debt_cert_status='수령', debt_cert_received_at=?, "
+                          "debt_cert_requested_at=COALESCE(debt_cert_requested_at, ?) WHERE id=?",
+                          (today, today, creditor_id))
+            self.log(case_id, user_id, "부채증명서 등록",
+                     {"채권자": cr["name"], "파일": source_name, "기준일": base_date, "합계": total,
+                      "채권에 반영": bool(applied)})
+            return cur.lastrowid
+
+    def debt_certs(self, case_id) -> list[dict]:
+        return self.q("SELECT d.*, cr.name AS creditor_name, u.name AS user_name FROM debt_certs d "
+                      "JOIN creditors cr ON cr.id=d.creditor_id LEFT JOIN users u ON u.id=d.user_id "
+                      "WHERE d.case_id=? ORDER BY d.id DESC", (case_id,))
+
+    def latest_certs(self, case_id) -> dict[int, dict]:
+        """채권자별 가장 최근 증명서."""
+        out: dict[int, dict] = {}
+        for r in self.q("SELECT * FROM debt_certs WHERE case_id=? ORDER BY id", (case_id,)):
+            out[r["creditor_id"]] = r
+        return out
+
+    def delete_debt_cert(self, cert_id, user_id):
+        r = self.one("SELECT case_id, source_name FROM debt_certs WHERE id=?", (cert_id,))
+        with self.tx() as c:
+            c.execute("DELETE FROM debt_certs WHERE id=?", (cert_id,))
+            self.log(r["case_id"], user_id, "부채증명서 기록 삭제", r["source_name"])
 
     # ---------- 경고 확인 기록 ----------
     def acks(self, case_id) -> dict[str, dict]:

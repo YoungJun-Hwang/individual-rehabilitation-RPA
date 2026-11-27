@@ -54,11 +54,14 @@ RULE_LABELS = {
     "R4": "양도 전·후 중복 의심",
     "R5": "금액 기준일 불일치",
     "R6": "금액·발생일 빈칸",
+    "R7": "부채증명서와 금액 불일치",
 }
 
 
 def check(creditors: list[dict], claims: list[dict], credit_items: list[dict],
-          questionnaire: dict[str, dict], question_labels: dict[str, str]) -> list[Warning]:
+          questionnaire: dict[str, dict], question_labels: dict[str, str],
+          certs: dict[int, dict] | None = None) -> list[Warning]:
+    """certs: 채권자 id → 가장 최근 부채증명서 (3단계). 없으면 R7을 건너뜀."""
     out: list[Warning] = []
 
     # R1 신용정보조회서에 있는데 채권자목록에 없는 채권자
@@ -131,6 +134,19 @@ def check(creditors: list[dict], claims: list[dict], credit_items: list[dict],
         if c["id"] not in with_claims:
             out.append(Warning(f"R6:creditor:{c['id']}", "R6",
                                f"'{c['name']}'에 등록된 채권(계약)이 없습니다.", c["name"]))
+    # R7 부채증명서 합계와 입력된 채권 합계가 다름
+    for c in creditors:
+        cert = (certs or {}).get(c["id"])
+        if not cert or cert.get("total") is None:
+            continue
+        mine = [claim_total(cl) for cl in claims if cl["creditor_id"] == c["id"]]
+        if not mine or any(t == UNKNOWN for t in mine):
+            continue   # 빈칸은 R6에서 경고
+        s = sum(mine)
+        if s != cert["total"]:
+            out.append(Warning(f"R7:{cert['id']}:{s}", "R7",
+                               f"'{c['name']}' 부채증명서 합계는 {cert['total']:,}원(기준일 {cert.get('base_date') or '미확인'})인데 "
+                               f"입력된 채권 합계는 {s:,}원입니다 (차이 {cert['total'] - s:+,}원).", c["name"]))
     return out
 
 

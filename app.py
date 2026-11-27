@@ -11,7 +11,7 @@ from datetime import date, datetime
 import pandas as pd
 import streamlit as st
 
-from core import credit_pdf, export, listing, rules
+from core import credit_pdf, debt_cert, export, listing, ocr, rules
 from core.db import (DB, DEBT_CERT_STATES, ROLE_ADMIN, ROLE_LAWYER, ROLE_STAFF, ROLES,
                      STATUS_APPROVED, STATUS_DRAFT, STATUS_REVIEW, STATUSES)
 
@@ -59,7 +59,7 @@ def amt_str(v) -> str:
 
 def warnings_for(case_id):
     ws = rules.check(db.creditors(case_id), db.claims(case_id), db.credit_items(case_id),
-                     db.get_questionnaire(case_id), Q_LABELS)
+                     db.get_questionnaire(case_id), Q_LABELS, db.latest_certs(case_id))
     acks = db.acks(case_id)
     return ws, acks, rules.open_warnings(ws, acks)
 
@@ -552,6 +552,238 @@ def page_agency(case):
     st.progress(recv / len(creditors), text=f"수령 {recv} / {len(creditors)}")
 
 
+# ---------------- 화면: 부채증명서 대조 (3단계) ----------------
+NEW_CLAIM = "➕ 새 채권으로 추가"
+CERT_COLS = {"principal": "원금", "interest": "이자", "late": "지연손해금", "other": "기타", "total": "합계"}
+
+
+def _num(v):
+    return None if v is None or (isinstance(v, float) and pd.isna(v)) or v == "" else int(v)
+
+
+def _claim_option(j, cl):
+    return f"{j}. {cl['cause'] or '원인 미기재'} ({cl['occurred_date'] or '발생일 미확인'}, " \
+           f"{listing.fmt_amount(rules.claim_total(cl))})"
+
+
+def page_debt_cert(case):
+    st.header("부채증명서 대조")
+    st.caption("받은 부채증명서(스캔본 PDF·사진·전자 PDF)를 올리면 기준일과 금액을 읽어, 입력된 채권과 대조합니다. "
+               "읽은 값은 원문과 대조해 확인한 뒤에만 반영됩니다. 파일은 저장하지 않습니다.")
+    cid = case["id"]
+    qkey = f"certq_{cid}"
+    flash = ss.pop(f"certflash_{cid}", None)
+    if flash:
+        st.success(flash)
+    creditors = db.creditors(cid)
+    if not creditors:
+        st.info("먼저 채권자를 입력하세요.")
+        return
+    ok, why = ocr.tesseract_status()
+    if not ok:
+        st.warning(why)
+
+    queue = ss.get(qkey) or []
+    if not queue:
+        with st.form(f"cert_up_{cid}", clear_on_submit=True):
+            files = st.file_uploader("부채증명서 파일 (여러 개 가능)", type=["pdf", "jpg", "jpeg", "png", "tif", "tiff"],
+                                     accept_multiple_files=True)
+            c1, c2 = st.columns(2)
+            rot = c1.selectbox("회전 (옆으로 누운 스캔본)", [0, 90, 180, 270], format_func=lambda d: f"{d}°")
+            split = c2.checkbox("한 파일에 여러 증명서가 있음 (쪽마다 따로 읽기)")
+            if st.form_submit_button("읽기", type="primary"):
+                if not files:
+                    st.error("파일을 올리세요.")
+                else:
+                    claims = db.claims(cid)
+                    items, errors = [], []
+                    with st.spinner("읽는 중... (스캔본은 한 쪽에 몇 초 걸립니다)"):
+                        for f in files:
+                            try:
+                                got = debt_cert.read_certificate(f.getvalue(), f.name, case["debtor_name"], rot, split)
+                            except ocr.OcrUnavailable as e:
+                                errors.append(f"{f.name}: {e}")
+                                continue
+                            except Exception as e:
+                                errors.append(f"{f.name}: 읽지 못했습니다 ({e})")
+                                continue
+                            for n, (res, pages) in enumerate(got, start=1):
+                                name = f.name + (f" ({n}쪽)" if split and len(got) > 1 else "")
+                                guess = debt_cert.guess_creditor(res.text, creditors, claims)
+                                items.append({"name": name, "res": res, "pages": pages, "guess": guess})
+                    for e in errors:
+                        st.error(e)
+                    if items:
+                        ss[qkey] = items
+                        st.rerun()
+    else:
+        _review_cert(case, queue, creditors)
+
+    st.divider()
+    st.subheader("등록된 부채증명서")
+    certs = db.debt_certs(cid)
+    if not certs:
+        st.caption("아직 없습니다.")
+        return
+    latest = db.latest_certs(cid)
+    claims = db.claims(cid)
+    rows = []
+    for c in certs:
+        mine = [rules.claim_total(cl) for cl in claims if cl["creditor_id"] == c["creditor_id"]]
+        s = sum(mine) if mine and all(t != rules.UNKNOWN for t in mine) else None
+        state = "" if latest.get(c["creditor_id"], {}).get("id") != c["id"] else (
+            "✅ 일치" if s is not None and s == c["total"] else
+            ("❓ 비교 불가" if s is None or c["total"] is None else f"❌ 차이 {c['total'] - s:+,}원"))
+        rows.append({"채권자": c["creditor_name"], "기준일": c["base_date"] or "미확인",
+                     "증명서 합계": listing.fmt_amount(c["total"]), "입력된 채권 합계": listing.fmt_amount(s),
+                     "대조": state or "(이전 증명서)", "채권 반영": "예" if c["applied"] else "아니오",
+                     "파일": c["source_name"], "등록": f"{c['user_name']} {c['created_at']}"})
+    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+    with st.expander("증명서 기록 삭제"):
+        pick = st.selectbox("삭제할 기록", [f"{c['id']}: {c['creditor_name']} · {c['source_name']}" for c in certs])
+        if st.button("기록 삭제"):
+            db.delete_debt_cert(int(pick.split(":")[0]), ss.user["id"])
+            st.rerun()
+
+
+def _review_cert(case, queue, creditors):
+    cid = case["id"]
+    qkey = f"certq_{cid}"
+    item = queue[0]
+    res = item["res"]
+    st.markdown(f"#### 확인 {1}/{len(queue)} · {item['name']}")
+    cr_names = {c["id"]: c["name"] for c in creditors}
+    ids = list(cr_names)
+    default = ids.index(item["guess"]) if item["guess"] in ids else 0
+    left, right = st.columns([3, 2])
+    with left:
+        c1, c2 = st.columns(2)
+        cr_id = c1.selectbox("어느 채권자의 증명서인가요?", ids, index=default, format_func=lambda i: cr_names[i],
+                             key=f"cert_cr_{cid}_{item['name']}")
+        if item["guess"] is None:
+            c1.caption("⚠️ 증명서에서 채권자 이름을 찾지 못했습니다. 직접 고르세요.")
+        elif res.issuer_line:
+            c1.caption(f"증명서의 채권자 줄: {res.issuer_line}")
+        base = c2.text_input("금액 기준일", res.base_date or "", key=f"cert_base_{cid}_{item['name']}")
+        if res.debtor_found is False or res.checks:
+            for m in res.checks:
+                st.warning(m)
+        for m in res.estimated:
+            st.warning("추정값: " + m)
+
+        claims = [cl for cl in db.claims(cid) if cl["creditor_id"] == cr_id]
+        options = [NEW_CLAIM] + [_claim_option(j, cl) for j, cl in enumerate(claims, start=1)]
+        targets = debt_cert.default_targets(res.contracts, claims)
+        contracts = res.contracts or [debt_cert.Contract()]
+        df = pd.DataFrame([{
+            "반영할 채권": options[1 + [cl["id"] for cl in claims].index(t)] if t else NEW_CLAIM,
+            "과목": c.label, "발생일": c.date or "", **{CERT_COLS[f]: getattr(c, f) for f in CERT_COLS}}
+            for c, t in zip(contracts, targets + [None] * (len(contracts) - len(targets)))])
+        for v in CERT_COLS.values():
+            df[v] = pd.to_numeric(df[v], errors="coerce")   # 빈칸을 'None' 대신 빈칸으로 표시
+        st.markdown("**증명서에서 읽은 계약** — 원문과 다르면 칸을 직접 고치세요. 계약을 더하거나 뺄 수도 있습니다.")
+        edited = st.data_editor(
+            df, hide_index=True, use_container_width=True, num_rows="dynamic", key=f"cert_ed_{cid}_{item['name']}_{cr_id}",
+            column_config={**{v: st.column_config.NumberColumn(v, format="localized", step=1) for v in CERT_COLS.values()},
+                           "반영할 채권": st.column_config.SelectboxColumn(options=options, required=True)})
+        rows = []
+        for _, r in edited.iterrows():
+            row = {f: _num(r[CERT_COLS[f]]) for f in CERT_COLS}
+            row.update(label=str(r["과목"] or "").strip(), date=str(r["발생일"] or "").strip() or None,
+                       target=r["반영할 채권"])
+            if any(row[f] is not None for f in CERT_COLS):
+                rows.append(row)
+        # 합계: 각 계약 합계(없으면 원금+이자+지연손해금+기타)를 더함
+        sums = {}
+        for f in ("principal", "interest", "late", "other"):
+            vals = [r[f] for r in rows]
+            sums[f] = sum(vals) if vals and all(v is not None for v in vals) else (
+                None if f != "other" else sum(v or 0 for v in vals) or None)
+        totals = [r["total"] if r["total"] is not None else (
+            None if any(r[f] is None for f in ("principal", "interest", "late"))
+            else r["principal"] + r["interest"] + r["late"] + (r["other"] or 0)) for r in rows]
+        cert_total = sum(totals) if totals and all(t is not None for t in totals) else None
+        summary = debt_cert.Contract(principal=sums["principal"], interest=sums["interest"], late=sums["late"],
+                                     other=sums["other"], total=cert_total)
+        for i, (r, t) in enumerate(zip(rows, totals), start=1):
+            comp = None if any(r[f] is None for f in ("principal", "interest", "late")) else \
+                r["principal"] + r["interest"] + r["late"] + (r["other"] or 0)
+            if r["total"] is not None and comp is not None and comp != r["total"]:
+                st.error(f"{i}번 계약: 원금+이자+지연손해금+기타 = {comp:,}원 ≠ 합계 {r['total']:,}원")
+        st.markdown("**입력된 채권과 대조**")
+        cmp = debt_cert.compare(summary, claims)
+        st.dataframe(pd.DataFrame([{k: (listing.fmt_amount(v) if k != "항목" else v) if k != "차이" else
+                                    ("" if v is None else ("✅ 0" if v == 0 else f"{v:+,}")) for k, v in r.items()}
+                                   for r in cmp]), hide_index=True, use_container_width=True)
+        if summary.other:
+            st.info(f"증명서에 기타(비용·수수료 등) {summary.other:,}원이 있습니다. 채권 칸에는 원금·이자·지연손해금만 "
+                    "들어가므로, 반영하면 이 금액만큼 차이가 남습니다. 처리 방법은 변호사와 정하세요.")
+        targets_used = [r["target"] for r in rows if r["target"] != NEW_CLAIM]
+        dup = len(targets_used) != len(set(targets_used))
+        if dup:
+            st.error("같은 채권에 계약 두 개를 반영하도록 되어 있습니다. '반영할 채권'을 고치세요.")
+        try:
+            base_iso = parse_date(base)
+        except ValueError as e:
+            st.error(str(e))
+            base_iso = "invalid"
+        b1, b2, b3 = st.columns(3)
+        can = bool(rows) and not dup and base_iso != "invalid"
+        if b1.button("확인하고 채권에 반영", type="primary", disabled=not can):
+            _save_cert(case, item, cr_id, base_iso, rows, summary, claims, apply=True)
+        if b2.button("증명서만 기록 (채권은 그대로)", disabled=not can):
+            _save_cert(case, item, cr_id, base_iso, rows, summary, claims, apply=False)
+        if b3.button("건너뛰기"):
+            ss[qkey] = queue[1:]
+            st.rerun()
+    with right:
+        pages = item["pages"]
+        pn = st.selectbox("원문 쪽", list(range(1, len(pages) + 1)), format_func=lambda p: f"{p}쪽",
+                          key=f"cert_pg_{cid}_{item['name']}") if len(pages) > 1 else 1
+        marks = [(bbox, color) for p, bbox, color in res.marks if p == pn]
+        st.image(ocr.draw_boxes(pages[pn - 1], marks), use_container_width=True)
+        st.caption("초록 = 금액을 읽은 줄, 주황 = 기준일, 회색 = 표 머리글" +
+                   (" · 글자 인식(OCR)으로 읽음" if pages[pn - 1].ocr else " · 전자 문서에서 바로 읽음"))
+        with st.expander("읽은 글 전체"):
+            st.text(res.text)
+
+
+def _save_cert(case, item, cr_id, base_iso, rows, summary, claims, apply: bool):
+    cid = case["id"]
+    uid = ss.user["id"]
+    by_option = {_claim_option(j, cl): cl for j, cl in enumerate(claims, start=1)}
+    evidence = f"부채증명서 ({base_iso or '기준일 미확인'} 기준)"
+    changed = 0
+    if apply:
+        cats = {cl["category"] for cl in claims}
+        for r in rows:
+            f = dict(principal=r["principal"], interest=r["interest"], late_fee=r["late"],
+                     amount_base_date=base_iso, evidence=evidence)
+            if r["other"]:
+                f["note"] = f"증명서상 기타 비용 {r['other']:,}원 별도"
+            cl = by_option.get(r["target"])
+            if cl:
+                if not cl["occurred_date"] and r["date"]:
+                    f["occurred_date"] = r["date"]
+                if not cl["cause"] and r["label"]:
+                    f["cause"] = r["label"]
+                db.update_claim(cl["id"], uid, **f)
+            else:
+                db.add_claim(cr_id, uid, cause=r["label"] or None, occurred_date=r["date"],
+                             category=next(iter(cats)) if len(cats) == 1 else None, **f)
+            changed += 1
+    db.save_debt_cert(cid, cr_id, uid, source_name=item["name"], base_date=base_iso,
+                      principal=summary.principal, interest=summary.interest, late_fee=summary.late,
+                      other=summary.other, total=summary.total, contracts=rows, ocr_text=item["res"].text,
+                      applied=apply)
+    q = ss.get(f"certq_{cid}") or []
+    ss[f"certq_{cid}"] = q[1:]
+    ss[f"certflash_{cid}"] = (f"'{item['name']}'을(를) 기록했습니다" +
+                              (f" · 채권 {changed}건에 반영" if apply else " (채권은 그대로)") +
+                              " · 부채증명서 상태를 '수령'으로 바꿨습니다.")
+    st.rerun()
+
+
 # ---------------- 화면: 미리보기·출력 ----------------
 def page_output(case):
     st.header("미리보기 · 출력")
@@ -673,11 +905,11 @@ def page_users():
 
 
 # ---------------- 메인 ----------------
-CASE_PAGES = ["사건 기본정보", "채무 문진", "채권자 입력", "신용정보 대조", "누락 점검", "발급대행 요청 목록",
-              "미리보기·출력", "변경 기록"]
+CASE_PAGES = ["사건 기본정보", "채무 문진", "채권자 입력", "신용정보 대조", "발급대행 요청 목록", "부채증명서 대조",
+              "누락 점검", "미리보기·출력", "변경 기록"]
 PAGE_FUNCS = {"사건 기본정보": page_basic, "채무 문진": page_questionnaire, "채권자 입력": page_creditors,
               "신용정보 대조": page_credit, "누락 점검": page_check, "발급대행 요청 목록": page_agency,
-              "미리보기·출력": page_output, "변경 기록": page_audit}
+              "부채증명서 대조": page_debt_cert, "미리보기·출력": page_output, "변경 기록": page_audit}
 
 
 def main():
