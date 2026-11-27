@@ -1,4 +1,4 @@
-"""개인회생 채권자목록 정리·누락 점검 프로그램 (1단계)
+"""개인회생 업무 자동화 프로그램 (채권자목록·신용정보조회서·부채증명서·보정명령·변제계획안)
 
 실행: 실행.bat 더블클릭 (또는 `streamlit run app.py`)
 모든 자료는 이 PC의 data/cases.db 파일에만 저장되며 인터넷으로 나가지 않습니다.
@@ -16,7 +16,7 @@ from core import correction, credit_pdf, debt_cert, export, listing, ocr, plan, 
 from core.db import (DB, DEBT_CERT_STATES, ROLE_ADMIN, ROLE_LAWYER, ROLE_STAFF, ROLES,
                      STATUS_APPROVED, STATUS_DRAFT, STATUS_REVIEW, STATUSES)
 
-st.set_page_config(page_title="채권자목록 정리", page_icon="📋", layout="wide")
+st.set_page_config(page_title="개인회생 업무 프로그램", page_icon="📋", layout="wide")
 
 
 @st.cache_resource
@@ -508,7 +508,7 @@ def page_check(case):
                     st.markdown(f"✅ ~~{w.message}~~")
                     st.caption(f"확인함: {ack['user_name']}({ack['role']}) · {ack['acked_at']} · 사유: {ack['note']}")
                     if st.button("확인 취소", key=f"un_{w.id}"):
-                        db.unack_warning(case["id"], ss.user["id"], w.id)
+                        db.unack_warning(case["id"], ss.user["id"], w.id, w.message)
                         st.rerun()
                 else:
                     st.markdown(f"⚠️ {w.message}")
@@ -517,7 +517,7 @@ def page_check(case):
                                          placeholder="확인 사유 (예: 부채증명서 발급 지연, 신용정보 금액으로 기재)")
                     if c2.button("확인함", key=f"ack_{w.id}"):
                         try:
-                            db.ack_warning(case["id"], ss.user["id"], w.id, note)
+                            db.ack_warning(case["id"], ss.user["id"], w.id, note, w.message)
                             st.rerun()
                         except ValueError as e:
                             st.error(str(e))
@@ -885,8 +885,8 @@ def page_output(case):
             p = Path(ss.last_hwp)
             if p.exists():
                 st.download_button("방금 만든 HWP 받기", p.read_bytes(), file_name=p.name)
-    with st.expander("인쇄용 HTML 미리보기"):
-        st.download_button("HTML 받기", export.creditor_list_html(case, rows, totals, draft).encode("utf-8"),
+    with st.expander("인쇄용 웹 문서(HTML)"):
+        st.download_button("웹 문서(HTML) 받기", export.creditor_list_html(case, rows, totals, draft).encode("utf-8"),
                            file_name="채권자목록.html", mime="text/html")
 
 
@@ -1064,7 +1064,7 @@ def page_plan(case):
                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     h = plan_export.plan_html(case, inp, r, draft)
     base = f"{case.get('case_no') or '사건'}_{case['debtor_name']}_변제계획안{'_초안' if draft else ''}"
-    c2.download_button("변제계획안 HTML 받기", h.encode("utf-8"), file_name=f"{base}.html", mime="text/html")
+    c2.download_button("변제계획안 웹 문서(HTML) 받기", h.encode("utf-8"), file_name=f"{base}.html", mime="text/html")
     hok, why = export.hwp_available()
     if c3.button("변제계획안 HWP 만들기", disabled=not hok, key="plan_hwp"):
         try:
@@ -1371,8 +1371,8 @@ def _tab_reply(case, o, items, docs):
     tag = "_초안" if draft else ""
     base = f"{case.get('case_no') or '사건'}_{case['debtor_name']}_{o['seq']}차보정서{tag}"
     c1, c2, c3 = st.columns(3)
-    c1.download_button("HTML 받기", h.encode("utf-8"), file_name=f"{base}.html", mime="text/html")
-    c2.download_button("글(TXT) 받기 — 전자소송 붙여넣기용", correction.reply_text(case, o, items, docs).encode("utf-8"),
+    c1.download_button("웹 문서(HTML) 받기", h.encode("utf-8"), file_name=f"{base}.html", mime="text/html")
+    c2.download_button("텍스트 파일(TXT) 받기 — 전자소송 붙여넣기용", correction.reply_text(case, o, items, docs).encode("utf-8"),
                        file_name=f"{base}.txt", mime="text/plain")
     ok, why = export.hwp_available()
     if c3.button("HWP 만들기", disabled=not ok, help=None if ok else why):

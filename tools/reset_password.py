@@ -26,7 +26,7 @@ def main() -> int:
     print("비밀번호를 초기화할 계정을 고르세요.\n")
     for i, u in enumerate(users, start=1):
         print(f"  {i}. {u['name']} ({u['role']}){'' if u['active'] else ' - 사용 안 함'}")
-    choice = input("\n번호 (그만두려면 Enter): ").strip()
+    choice = input("\n번호를 입력하세요 (그만두려면 아무것도 입력하지 말고 Enter 키): ").strip()
     if not choice:
         print("아무것도 바꾸지 않았습니다.")
         return 0

@@ -67,10 +67,10 @@ def tesseract_status() -> tuple[bool, str]:
                 return False, f"Tesseract를 실행할 수 없습니다: {e}"
             if "kor" not in langs:
                 return False, ("Tesseract에 한국어 데이터(kor)가 없습니다. 설치 프로그램을 다시 실행해 "
-                               "'Additional language data'에서 Korean을 체크하세요.")
+                               "'Additional language data'(추가 언어 데이터)에서 Korean(한국어)을 체크하세요.")
             return True, cmd
-    return False, ("Tesseract OCR이 설치되어 있지 않습니다. README의 '부채증명서 OCR' 설치 방법을 따라 설치하세요. "
-                   "(글자가 들어 있는 전자 발급 PDF는 설치 없이도 읽을 수 있습니다)")
+    return False, ("Tesseract(글자 인식 프로그램)가 설치되어 있지 않습니다. README의 '3. (선택) Tesseract 설치'를 "
+                   "따라 설치하세요. (글자가 들어 있는 전자 발급 PDF는 설치 없이도 읽을 수 있습니다)")
 
 
 # ---------------- 전처리 ----------------

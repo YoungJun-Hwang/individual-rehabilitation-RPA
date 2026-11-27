@@ -181,3 +181,24 @@ def test_import_credit_items_dedupes(env):
     assert (added, skipped) == (1, 3)
     assert [i["institution"] for i in db.credit_items(cid)] == ["(주)국민은행", "신한카드"]
     assert any(a["action"] == "신용정보 PDF 가져오기" for a in db.audit(cid))
+
+
+def test_audit_log_is_readable_korean(env):
+    """변경 기록 화면에 영어 칸 이름·null·경고 번호가 그대로 보이지 않아야 함 (예전 기록 포함)."""
+    import re
+    db, s, l, cid = env
+    db.update_case(cid, s["id"], list_base_date="2026-11-30", lawyer_id=l["id"])
+    a = db.add_creditor(cid, s["id"], name="국민카드")
+    db.update_creditor(a, s["id"], debt_cert_status="요청함")
+    clm = db.add_claim(a, s["id"], category="card", principal=1_000_000)
+    db.update_claim(clm, s["id"], interest=None)
+    db.ack_warning(cid, s["id"], "R6:1:이자", "확인", "국민카드 채권에 빈칸: 이자")
+    db.log(cid, s["id"], "기본정보 수정", ["court"])                      # 예전 형식
+    db.log(cid, s["id"], "경고 확인함", {"경고": "R3:2", "사유": "지연"})  # 예전 형식
+    db.conn.commit()
+    details = [r["detail"] for r in db.audit(cid)]
+    text = " | ".join(d for d in details if d)
+    assert not re.search(r"[a-z_]{4,}", text), text                     # principal, debt_cert_status, null 등
+    assert "원금: 1,000,000원" in text and "이자: (빈칸)" in text and "담당 변호사: 김변호사" in text
+    assert "분류: 신용카드" in text and "관할 법원" in text and "부채증명서 미수령 (R3:2)" in text
+    assert "경고: 국민카드 채권에 빈칸: 이자" in text

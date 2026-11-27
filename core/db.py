@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import os
 import secrets
 import sqlite3
@@ -224,11 +225,74 @@ class DB:
         )
 
     def audit(self, case_id) -> list[dict]:
-        return self.q(
+        rows = self.q(
             "SELECT a.at, u.name AS user, u.role, a.action, a.detail FROM audit_log a "
             "LEFT JOIN users u ON u.id=a.user_id WHERE a.case_id=? ORDER BY a.id DESC",
             (case_id,),
         )
+        for r in rows:
+            r["detail"] = self.readable_detail(r["detail"])
+        return rows
+
+    # 변경 기록에 저장된 칸 이름(영어)을 화면에 보일 한글 이름으로
+    FIELD_LABELS = {
+        # 사건
+        "case_no": "사건번호", "debtor_name": "채무자", "debtor_birth": "생년월일", "debtor_address": "주소",
+        "debtor_phone": "연락처", "court": "관할 법원", "lawyer_id": "담당 변호사", "list_base_date": "채권자목록 기준일",
+        "memo": "메모",
+        # 채권자
+        "name": "이름", "biz_no": "사업자번호", "address": "주소", "phone": "전화", "fax": "팩스",
+        "debt_cert_status": "부채증명서 상태", "debt_cert_requested_at": "부채증명서 요청일",
+        "debt_cert_received_at": "부채증명서 수령일", "sort_order": "순서",
+        # 채권
+        "category": "분류", "cause": "발생원인", "occurred_date": "발생일", "principal": "원금", "interest": "이자",
+        "late_fee": "지연손해금", "amount_base_date": "금액 기준일", "transferred_from": "양도 전 채권자",
+        "evidence": "근거 서류", "note": "비고",
+        # 보정명령
+        "order_date": "명령일", "served_date": "송달일", "days": "보정 기간(일)", "deadline": "기한",
+        "no": "번호", "heading": "큰 제목", "text": "명령 내용", "answer": "답변",
+        "status": "상태", "requested_at": "요청일", "received_at": "수령일",
+        # 예전 기록에 남은 이름
+        "채권ID": "채권 번호",
+    }
+    AMOUNT_FIELDS = {"principal", "interest", "late_fee"}
+
+    def readable_detail(self, detail):
+        """저장된 기록(JSON)을 '이름: 값 · 이름: 값' 꼴의 한글 문장으로. 예전 기록에도 그대로 적용됨."""
+        if not detail:
+            return detail
+        try:
+            data = json.loads(detail)
+        except (TypeError, ValueError):
+            return detail          # 평범한 글은 그대로
+        if isinstance(data, list):
+            return ", ".join(self.FIELD_LABELS.get(str(k), str(k)) for k in data)
+        if not isinstance(data, dict):
+            return detail
+        parts = []
+        for k, v in data.items():
+            parts.append(f"{self.FIELD_LABELS.get(k, k)}: {self._readable_value(k, v)}")
+        return " · ".join(parts)
+
+    def _readable_value(self, key, v):
+        if v is None or v == "":
+            return "(빈칸)"
+        if isinstance(v, bool):
+            return "예" if v else "아니오"
+        if key in self.AMOUNT_FIELDS and isinstance(v, int):
+            return f"{v:,}원"
+        if key == "category":
+            from .listing import questions
+            return {q["key"]: q["label"] for q in questions()}.get(v, v)
+        if key == "lawyer_id":
+            u = self.one("SELECT name FROM users WHERE id=?", (v,))
+            return u["name"] if u else v
+        if key == "경고" and isinstance(v, str) and re.match(r"^R\d:", v):
+            from .rules import RULE_LABELS          # 예전 기록: 'R6:1:이자' → '금액·발생일 빈칸 (R6:1:이자)'
+            return f"{RULE_LABELS.get(v[:2], '')} ({v})".strip()
+        if isinstance(v, (list, dict)):
+            return json.dumps(v, ensure_ascii=False)
+        return str(v)
 
     # ---------- 사용자 ----------
     @staticmethod
@@ -359,7 +423,7 @@ class DB:
         with self.tx() as c:
             c.execute(f"UPDATE cases SET {sets}, updated_at=? WHERE id=?", (*cols.values(), now(), case_id))
             self._invalidate_approval(case_id, user_id, "기본정보 수정")
-            self.log(case_id, user_id, "기본정보 수정", list(cols))
+            self.log(case_id, user_id, "기본정보 수정", cols)
 
     def delete_case(self, case_id, user_id):
         with self.tx() as c:
@@ -491,7 +555,7 @@ class DB:
         with self.tx() as c:
             c.execute(f"UPDATE claims SET {','.join(f'{k}=?' for k in cols)} WHERE id=?", (*cols.values(), claim_id))
             self.touch(row["case_id"], user_id, "채권 수정")
-            self.log(row["case_id"], user_id, "채권 수정", {"채권자": row["name"], "채권ID": claim_id, **cols})
+            self.log(row["case_id"], user_id, "채권 수정", {"채권자": row["name"], "채권 번호": claim_id, **cols})
 
     def delete_claim(self, claim_id, user_id):
         row = self.one("SELECT cr.case_id, cr.name FROM claims cl JOIN creditors cr ON cr.id=cl.creditor_id "
@@ -499,7 +563,7 @@ class DB:
         with self.tx() as c:
             c.execute("DELETE FROM claims WHERE id=?", (claim_id,))
             self.touch(row["case_id"], user_id, "채권 삭제")
-            self.log(row["case_id"], user_id, "채권 삭제", {"채권자": row["name"], "채권ID": claim_id})
+            self.log(row["case_id"], user_id, "채권 삭제", {"채권자": row["name"], "채권 번호": claim_id})
 
     # ---------- 신용정보조회서 항목 (1단계는 직접 입력) ----------
     def credit_items(self, case_id) -> list[dict]:
@@ -793,7 +857,8 @@ class DB:
                       "WHERE w.case_id=?", (case_id,))
         return {r["warning_id"]: r for r in rows}
 
-    def ack_warning(self, case_id, user_id, warning_id, note):
+    def ack_warning(self, case_id, user_id, warning_id, note, message: str | None = None):
+        """message: 화면에 보인 경고 문장. 변경 기록에는 번호 대신 이 문장을 남김."""
         if not (note or "").strip():
             raise ValueError("확인 사유를 적어 주세요.")
         with self.tx() as c:
@@ -801,9 +866,9 @@ class DB:
                 "INSERT OR REPLACE INTO warning_acks(case_id,warning_id,user_id,note,acked_at) VALUES(?,?,?,?,?)",
                 (case_id, warning_id, user_id, note.strip(), now()),
             )
-            self.log(case_id, user_id, "경고 확인함", {"경고": warning_id, "사유": note.strip()})
+            self.log(case_id, user_id, "경고 확인함", {"경고": message or warning_id, "사유": note.strip()})
 
-    def unack_warning(self, case_id, user_id, warning_id):
+    def unack_warning(self, case_id, user_id, warning_id, message: str | None = None):
         with self.tx() as c:
             c.execute("DELETE FROM warning_acks WHERE case_id=? AND warning_id=?", (case_id, warning_id))
-            self.log(case_id, user_id, "경고 확인 취소", warning_id)
+            self.log(case_id, user_id, "경고 확인 취소", {"경고": message or warning_id})
