@@ -1,0 +1,12 @@
+[
+  {"key": "card", "label": "신용카드·카드론·현금서비스"},
+  {"key": "bank_loan", "label": "은행·저축은행·캐피탈 대출"},
+  {"key": "phone", "label": "휴대폰 할부금·통신요금 미납"},
+  {"key": "tax", "label": "세금·건강보험료·과태료 체납"},
+  {"key": "personal", "label": "개인 간 채무(지인·가족)"},
+  {"key": "guarantee", "label": "보증채무(다른 사람 빚 보증)"},
+  {"key": "judgment", "label": "판결·지급명령·압류 받은 채무"},
+  {"key": "lease", "label": "임대차·렌탈·리스 미납"},
+  {"key": "insurance", "label": "보험계약대출·약관대출"},
+  {"key": "other", "label": "기타 채무"}
+]
