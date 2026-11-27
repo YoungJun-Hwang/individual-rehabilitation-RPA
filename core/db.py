@@ -148,6 +148,15 @@ CREATE TABLE IF NOT EXISTS correction_docs (
     received_at TEXT,
     note TEXT
 );
+CREATE TABLE IF NOT EXISTS repayment_plans (
+    case_id INTEGER PRIMARY KEY REFERENCES cases(id) ON DELETE CASCADE,
+    inputs_json TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT '작성 중',
+    fingerprint TEXT,
+    approved_by INTEGER REFERENCES users(id),
+    approved_at TEXT,
+    updated_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS warning_acks (
     case_id INTEGER NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
     warning_id TEXT NOT NULL,
@@ -665,6 +674,58 @@ class DB:
                 c.execute("UPDATE corrections SET status=?, approved_by=NULL, approved_at=NULL, submitted_at=NULL "
                           "WHERE id=?", (status, oid))
             self.log(o["case_id"], user["id"], "보정 상태 변경", f"{o['seq']}차: {o['status']} → {status}")
+
+    # ---------- 변제계획안 (5단계) ----------
+    def get_plan(self, case_id) -> dict | None:
+        return self.one("SELECT p.*, u.name AS approved_by_name FROM repayment_plans p LEFT JOIN users u "
+                        "ON u.id=p.approved_by WHERE p.case_id=?", (case_id,))
+
+    def save_plan_inputs(self, case_id, user_id, inputs_json: str):
+        cur = self.get_plan(case_id)
+        if cur and cur["inputs_json"] == inputs_json:
+            return
+        with self.tx() as c:
+            c.execute("INSERT INTO repayment_plans(case_id,inputs_json,updated_at) VALUES(?,?,?) "
+                      "ON CONFLICT(case_id) DO UPDATE SET inputs_json=excluded.inputs_json, "
+                      "updated_at=excluded.updated_at", (case_id, inputs_json, now()))
+            if cur and cur["status"] != "작성 중":
+                c.execute("UPDATE repayment_plans SET status='작성 중', approved_by=NULL, approved_at=NULL "
+                          "WHERE case_id=?", (case_id,))
+                self.log(case_id, user_id, "변제계획안 상태 되돌림", f"{cur['status']} → 작성 중 (사유: 입력값 수정)")
+            self.log(case_id, user_id, "변제계획안 입력 저장")
+
+    def plan_list_changed(self, case_id, user_id, fingerprint: str) -> bool:
+        """검토 요청·확정 뒤 채권자목록이 바뀌었으면 '작성 중'으로 되돌리고 True."""
+        p = self.get_plan(case_id)
+        if not p or p["status"] == "작성 중" or not p["fingerprint"] or p["fingerprint"] == fingerprint:
+            return False
+        with self.tx() as c:
+            c.execute("UPDATE repayment_plans SET status='작성 중', approved_by=NULL, approved_at=NULL "
+                      "WHERE case_id=?", (case_id,))
+            self.log(case_id, user_id, "변제계획안 상태 되돌림", f"{p['status']} → 작성 중 (사유: 채권자목록 변경)")
+        return True
+
+    def set_plan_status(self, case_id, user: dict, status: str, fingerprint: str, blockers: list[str] | None = None):
+        p = self.get_plan(case_id)
+        if not p:
+            raise PermissionError("먼저 변제계획안 입력값을 저장하세요.")
+        if status == "검토 요청" and p["status"] != "작성 중":
+            raise PermissionError("'작성 중' 상태에서만 검토 요청할 수 있습니다.")
+        if status == "변호사 확정":
+            if user["role"] != ROLE_LAWYER:
+                raise PermissionError("변호사 계정만 변제계획안을 확정할 수 있습니다.")
+            if p["status"] != "검토 요청":
+                raise PermissionError("'검토 요청' 상태에서만 확정할 수 있습니다.")
+            if blockers:
+                raise PermissionError("확정할 수 없습니다: " + " / ".join(blockers))
+        with self.tx() as c:
+            if status == "변호사 확정":
+                c.execute("UPDATE repayment_plans SET status=?, approved_by=?, approved_at=?, fingerprint=? "
+                          "WHERE case_id=?", (status, user["id"], now(), fingerprint, case_id))
+            else:
+                c.execute("UPDATE repayment_plans SET status=?, approved_by=NULL, approved_at=NULL, fingerprint=? "
+                          "WHERE case_id=?", (status, fingerprint if status != "작성 중" else None, case_id))
+            self.log(case_id, user["id"], "변제계획안 상태 변경", f"{p['status']} → {status}")
 
     # ---------- 경고 확인 기록 ----------
     def acks(self, case_id) -> dict[str, dict]:

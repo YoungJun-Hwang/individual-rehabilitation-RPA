@@ -12,7 +12,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from core import correction, credit_pdf, debt_cert, export, listing, ocr, rules
+from core import correction, credit_pdf, debt_cert, export, listing, ocr, plan, plan_export, rules
 from core.db import (DB, DEBT_CERT_STATES, ROLE_ADMIN, ROLE_LAWYER, ROLE_STAFF, ROLES,
                      STATUS_APPROVED, STATUS_DRAFT, STATUS_REVIEW, STATUSES)
 
@@ -890,6 +890,200 @@ def page_output(case):
                            file_name="채권자목록.html", mime="text/html")
 
 
+# ---------------- 화면: 변제계획안 (5단계) ----------------
+P_DRAFT, P_REVIEW, P_FINAL = "작성 중", "검토 요청", "변호사 확정"
+DEFAULT_ASSETS = ["예금·현금", "보험 해약환급금", "임차보증금", "자동차", "퇴직금(예상액의 1/2)", "기타"]
+
+
+def page_plan(case):
+    st.header("변제계획안")
+    cid, user = case["id"], ss.user
+    creditors, claims = db.creditors(cid), db.claims(cid)
+    if not creditors:
+        st.info("먼저 채권자를 입력하세요.")
+        return
+    fp = plan.claims_fingerprint(creditors, claims)
+    if db.plan_list_changed(cid, user["id"], fp):
+        st.warning("검토 요청·확정 뒤 채권자목록이 바뀌어 변제계획안을 '작성 중'으로 되돌렸습니다. 다시 확인하세요.")
+    p = db.get_plan(cid)
+    inp = plan.Inputs.from_json(p["inputs_json"] if p else None)
+    cfg = plan.config()
+    status = p["status"] if p else P_DRAFT
+    st.markdown(f"상태: **{status}**" + (f" — {p['approved_by_name']} 변호사 확정 ({p['approved_at']})"
+                                       if p and p["approved_at"] else ""))
+    if case["status"] != STATUS_APPROVED:
+        st.info("채권자목록이 아직 '변호사 확인 완료' 전입니다. 계산은 할 수 있지만, 변제계획안 확정은 채권자목록 확인 뒤에 됩니다.")
+
+    years = sorted(cfg["median_income"])
+    with st.form(f"plan_{cid}"):
+        st.subheader("1. 소득과 생계비")
+        c1, c2, c3 = st.columns(3)
+        income = c1.text_input("월 평균 소득 (세금·4대보험 뺀 실수령액)", amt_str(inp.monthly_income))
+        income_note = c2.text_input("소득 근거", inp.income_note, placeholder="예: 최근 1년 급여 평균")
+        household = c3.number_input("생계비 가구원 수 (채무자 포함)", min_value=1, max_value=15, value=int(inp.household))
+        year = c1.selectbox("기준중위소득 연도", years, index=years.index(inp.median_year) if inp.median_year in years
+                            else len(years) - 1)
+        auto_living = plan.living_cost(year, int(household), cfg)
+        lo = c2.text_input("생계비 직접 입력 (비우면 자동 계산)", amt_str(inp.living_override),
+                           help=f"자동: {year}년 {household}인 기준중위소득 × {cfg['living_ratio']:.0%} = "
+                                f"{amt_str(auto_living)}원 (저장 뒤 반영)")
+        extra = c3.text_input("추가 생계비 (주거비·의료비·교육비 등)", amt_str(inp.extra_living or None))
+        extra_note = st.text_input("추가 생계비 사유", inp.extra_living_note,
+                                   placeholder="법원이 인정할지 변호사 판단이 필요한 항목입니다")
+
+        st.subheader("2. 변제 조건")
+        c1, c2, c3, c4 = st.columns(4)
+        months = c1.number_input("변제기간 (개월)", min_value=1, max_value=int(cfg["max_months"]), value=int(inp.months))
+        start = c2.text_input("첫 변제일 (예: 2027-01-25)", inp.start_date or "")
+        pay_o = c3.text_input("월 변제금 직접 정하기 (비우면 가용소득)", amt_str(inp.payment_override))
+        basis = c4.radio("채권액 기준", [plan.BASIS_TOTAL, plan.BASIS_PRINCIPAL],
+                         index=0 if inp.basis == plan.BASIS_TOTAL else 1)
+
+        st.subheader("3. 채권 구분")
+        st.caption("조세·공과금처럼 우선권 있는 채권은 '우선', 담보로 회수하는 채권은 '제외'. 우선·제외 여부는 변호사가 판단합니다.")
+        by_cr: dict[int, list] = {}
+        for cl in claims:
+            by_cr.setdefault(cl["creditor_id"], []).append(cl)
+        tdf = pd.DataFrame([{
+            "id": c["id"], "채권자": c["name"],
+            "채권액": listing.fmt_amount(sum(t for t in (rules.claim_total(x) for x in by_cr.get(c["id"], []))
+                                          if t != rules.UNKNOWN) or None),
+            "구분": inp.creditor_types.get(str(c["id"]),
+                                         plan.TYPE_PRIORITY if any(x["category"] == "tax" for x in by_cr.get(c["id"], []))
+                                         else plan.TYPE_GENERAL)} for c in creditors])
+        types = st.data_editor(tdf, hide_index=True, width="stretch", disabled=["id", "채권자", "채권액"],
+                               column_config={"id": None, "구분": st.column_config.SelectboxColumn(
+                                   options=plan.CREDITOR_TYPES, required=True)}, key=f"ptypes_{cid}")
+
+        st.subheader("4. 재산 (청산가치)")
+        st.caption("청산가치 반영액 = 평가액 − 공제·면제액 (압류금지 예금, 소액임차보증금 최우선변제액 등). "
+                   "퇴직금은 예상액의 1/2 등 법원 실무에 맞게 넣으세요.")
+        assets = inp.assets or [{"name": n, "value": 0, "deduct": 0, "note": ""} for n in DEFAULT_ASSETS]
+        adf = pd.DataFrame([{"재산": a.get("name", ""), "평가액": a.get("value") or 0, "공제·면제액": a.get("deduct") or 0,
+                             "메모": a.get("note", "")} for a in assets])
+        aed = st.data_editor(adf, hide_index=True, width="stretch", num_rows="dynamic", key=f"passets_{cid}",
+                             column_config={"평가액": st.column_config.NumberColumn(format="localized", step=1, min_value=0),
+                                            "공제·면제액": st.column_config.NumberColumn(format="localized", step=1, min_value=0)})
+        if st.form_submit_button("저장하고 계산", type="primary"):
+            try:
+                new = plan.Inputs(
+                    monthly_income=parse_amount(income), income_note=income_note.strip(), household=int(household),
+                    median_year=year, living_override=parse_amount(lo), extra_living=parse_amount(extra) or 0,
+                    extra_living_note=extra_note.strip(), months=int(months), start_date=parse_date(start),
+                    payment_override=parse_amount(pay_o), basis=basis,
+                    creditor_types={str(int(r["id"])): r["구분"] for _, r in types.iterrows()},
+                    assets=[{"name": str(r["재산"] or "").strip(), "value": int(r["평가액"] or 0),
+                             "deduct": int(r["공제·면제액"] or 0), "note": str(r["메모"] or "")}
+                            for _, r in aed.iterrows() if str(r["재산"] or "").strip()])
+                db.save_plan_inputs(cid, user["id"], new.to_json())
+                st.rerun()
+            except ValueError as e:
+                st.error(str(e))
+    if not p:
+        st.caption("값을 넣고 '저장하고 계산'을 누르면 결과가 나옵니다.")
+        return
+
+    r = plan.compute(inp, creditors, claims, cfg)
+    st.divider()
+    st.subheader("계산 결과")
+    for e in r.errors:
+        st.error(e)
+    if r.errors:
+        return
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("월 변제금", f"{r.payment:,}원", help=f"월 소득 {inp.monthly_income:,} − 생계비 {r.living:,} = 가용소득 {r.available:,}")
+    c2.metric("총 변제예정액", f"{r.total_pay:,}원", help=f"{r.months}개월")
+    c3.metric("일반채권 변제율", f"{r.repay_rate * 100:.2f}%")
+    c4.metric("무담보 채권 총액", f"{r.debt_total:,}원")
+    checks = [
+        (r.pv_ok, f"청산가치 보장: 총 변제예정액의 현재가치 {r.pv:,}원 {'≥' if r.pv_ok else '<'} 청산가치 {r.liquidation:,}원"),
+        (r.min_ok, f"최저변제액: 총 변제예정액 {r.total_pay:,}원 {'≥' if r.min_ok else '<'} "
+                   f"{min(r.min_required, r.debt_total):,}원"),
+    ]
+    for ok_, msg in checks:
+        (st.success if ok_ else st.error)(("✅ " if ok_ else "❌ ") + msg)
+    if r.suggestion:
+        st.info("제안: " + r.suggestion)
+    for w in r.warnings:
+        st.warning(w)
+    if inp.living_override is None:
+        st.caption(f"⚠️ 생계비는 config/plan.json의 {inp.median_year}년 기준중위소득으로 계산했습니다. "
+                   "보건복지부 고시와 같은지 확인하세요.")
+
+    names = {x.creditor_id: x.name for x in r.rows}
+    st.dataframe(pd.DataFrame([{"번호": x.no, "채권자": x.name, "구분": x.kind, "채권액": f"{x.claim:,}",
+                                "비율": f"{x.share * 100:.2f}%" if x.kind != plan.TYPE_EXCLUDED else "-",
+                                "평상시 월 변제액": f"{x.regular_month:,}", "총 변제예정액": f"{x.total_pay:,}",
+                                "변제율": f"{x.total_pay / x.claim * 100:.2f}%" if x.claim else "-"} for x in r.rows]),
+                 hide_index=True, width="stretch")
+    with st.expander(f"월별 변제표 ({r.months}회)"):
+        st.dataframe(pd.DataFrame([{"회차": m["회차"], "날짜": m["날짜"],
+                                    **{names[i]: f"{m.get(i, 0):,}" for i in names if any(x.creditor_id == i and
+                                       x.kind != plan.TYPE_EXCLUDED for x in r.rows)},
+                                    "합계": f"{m['합계']:,}"} for m in r.schedule]), hide_index=True, width="stretch")
+
+    st.divider()
+    st.subheader("검토 · 확정")
+    blockers = []
+    if case["status"] != STATUS_APPROVED:
+        blockers.append("채권자목록이 '변호사 확인 완료' 상태가 아닙니다.")
+    if not r.pv_ok:
+        blockers.append("청산가치 보장 기준을 넘지 못합니다.")
+    if not r.min_ok:
+        blockers.append("최저변제액 기준을 넘지 못합니다.")
+    for b in blockers:
+        st.markdown(f"- {b}")
+    b1, b2, b3 = st.columns(3)
+    try:
+        if status == P_DRAFT and b1.button("검토 요청", type="primary", key="plan_req"):
+            db.set_plan_status(cid, user, P_REVIEW, fp)
+            st.rerun()
+        if status == P_REVIEW:
+            if user["role"] == ROLE_LAWYER:
+                ok = st.checkbox("소득·생계비·채권 구분·청산가치를 직접 확인했고, 이 변제계획안으로 확정합니다.", key="plan_ok")
+                if b1.button("변호사 확정", type="primary", disabled=bool(blockers) or not ok, key="plan_final"):
+                    db.set_plan_status(cid, user, P_FINAL, fp, blockers)
+                    st.rerun()
+            else:
+                b1.info("변호사 확정을 기다리는 중입니다.")
+        if status != P_DRAFT and b2.button("작성 중으로 되돌리기", key="plan_back"):
+            db.set_plan_status(cid, user, P_DRAFT, fp)
+            st.rerun()
+    except PermissionError as e:
+        st.error(str(e))
+    st.caption("확정 뒤 입력값이나 채권자목록이 바뀌면 자동으로 '작성 중'으로 돌아갑니다.")
+
+    st.divider()
+    st.subheader("파일 출력")
+    draft = status != P_FINAL
+    if draft:
+        st.info("변호사 확정 전이라 **초안**으로 만들어집니다.")
+    c1, c2, c3 = st.columns(3)
+    xp = plan_export.plan_xlsx(case, inp, r, draft)
+    c1.download_button("계산 근거표 엑셀 받기", xp.read_bytes(), file_name=xp.name,
+                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    h = plan_export.plan_html(case, inp, r, draft)
+    base = f"{case.get('case_no') or '사건'}_{case['debtor_name']}_변제계획안{'_초안' if draft else ''}"
+    c2.download_button("변제계획안 HTML 받기", h.encode("utf-8"), file_name=f"{base}.html", mime="text/html")
+    hok, why = export.hwp_available()
+    if c3.button("변제계획안 HWP 만들기", disabled=not hok, key="plan_hwp"):
+        try:
+            out = export.html_to_hwp(h, export.OUTPUT_DIR / f"{base}.hwp")
+            db.log(cid, user["id"], "변제계획안 HWP 출력", {"파일": out.name, "초안": draft})
+            db.conn.commit()
+            ss[f"planhwp_{cid}"] = str(out)
+        except Exception as e:
+            st.error(f"HWP 출력 실패: {e}")
+    if not hok:
+        c3.caption(why)
+    hp = ss.get(f"planhwp_{cid}")
+    if hp and Path(hp).exists():
+        st.download_button("방금 만든 HWP 받기", Path(hp).read_bytes(), file_name=Path(hp).name)
+    with st.expander("변제계획안 미리보기"):
+        import streamlit.components.v1 as components
+        components.html(f"<div style='background:#fff;color:#000;padding:16px'>{h}</div>", height=700, scrolling=True)
+
+
 # ---------------- 화면: 보정명령 (4단계) ----------------
 def _upload_text(f) -> str:
     pages = ocr.read_file(f.getvalue(), f.name)
@@ -1262,10 +1456,10 @@ def page_users():
 
 # ---------------- 메인 ----------------
 CASE_PAGES = ["사건 기본정보", "채무 문진", "채권자 입력", "신용정보 대조", "발급대행 요청 목록", "부채증명서 대조",
-              "누락 점검", "미리보기·출력", "보정명령", "변경 기록"]
+              "누락 점검", "미리보기·출력", "변제계획안", "보정명령", "변경 기록"]
 PAGE_FUNCS = {"사건 기본정보": page_basic, "채무 문진": page_questionnaire, "채권자 입력": page_creditors,
               "신용정보 대조": page_credit, "누락 점검": page_check, "발급대행 요청 목록": page_agency,
-              "부채증명서 대조": page_debt_cert, "미리보기·출력": page_output, "보정명령": page_corrections,
+              "부채증명서 대조": page_debt_cert, "미리보기·출력": page_output, "변제계획안": page_plan, "보정명령": page_corrections,
               "변경 기록": page_audit}
 
 
